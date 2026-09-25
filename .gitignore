@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# uv
+uv.lock.bak
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Node / GUI
+gui/node_modules/
+gui/dist/
+gui/.vite/
+
+# OS
+.DS_Store

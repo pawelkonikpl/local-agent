@@ -1,0 +1,19 @@
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+COPY services/llm-proxy/pyproject.toml services/llm-proxy/pyproject.toml
+COPY libs/shared/pyproject.toml libs/shared/pyproject.toml
+RUN uv sync --frozen --no-install-workspace --no-dev --package llm-proxy
+
+COPY services/llm-proxy/src services/llm-proxy/src
+COPY libs/shared/src libs/shared/src
+RUN uv sync --frozen --no-dev --package llm-proxy
+
+ENV PATH="/app/.venv/bin:${PATH}"
+EXPOSE 8080
+
+CMD ["uvicorn", "llm_proxy.main:app", "--host", "0.0.0.0", "--port", "8080", "--app-dir", "services/llm-proxy/src"]

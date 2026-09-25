@@ -1,0 +1,19 @@
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+COPY services/api/pyproject.toml services/api/pyproject.toml
+COPY libs/shared/pyproject.toml libs/shared/pyproject.toml
+RUN uv sync --frozen --no-install-workspace --no-dev --package api
+
+COPY services/api/src services/api/src
+COPY libs/shared/src libs/shared/src
+RUN uv sync --frozen --no-dev --package api
+
+ENV PATH="/app/.venv/bin:${PATH}"
+EXPOSE 8000
+
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--app-dir", "services/api/src"]

@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+ && pip install --no-cache-dir "transformers>=4.50" accelerate "fastapi>=0.141" "uvicorn[standard]>=0.32" "pydantic-settings>=2.6"
+
+RUN useradd -u 10001 -m -d /home/appuser appuser
+USER 10001:10001
+WORKDIR /home/appuser
+
+COPY --chown=10001:10001 services/local-model/src/local_model ./local_model
+
+ENV HF_HOME=/home/appuser/.cache/huggingface
+ENV PYTHONPATH=/home/appuser
+EXPOSE 8080
+
+CMD ["python", "-m", "uvicorn", "local_model.main:app", "--host", "0.0.0.0", "--port", "8080"]

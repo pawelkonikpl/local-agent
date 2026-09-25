@@ -1,0 +1,150 @@
+import json
+import uuid
+from collections.abc import Callable
+
+import httpx
+from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.auth.security import hash_password
+from api.chat.routes import get_llm_proxy_client
+from api.main import app
+from shared.db.models import ChatSession, Message
+
+
+def _sse_body(text: str) -> bytes:
+    events: list[tuple[str, dict]] = [
+        (
+            "message_start",
+            {"type": "message_start", "message": {"model": "claude-sonnet-5", "usage": {"input_tokens": 5, "output_tokens": 0}}},
+        ),
+        (
+            "content_block_delta",
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}},
+        ),
+        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}}),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    lines: list[str] = []
+    for event_type, data in events:
+        lines.append(f"event: {event_type}")
+        lines.append(f"data: {json.dumps(data)}")
+        lines.append("")
+    return ("\n".join(lines) + "\n").encode()
+
+
+def _mock_llm_proxy_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://mock-llm-proxy.test")
+
+
+async def _create_user_and_login(client: AsyncClient, db_session: AsyncSession, email: str) -> None:
+    from api.db.models.user import User
+
+    user = User(email=email, password_hash=hash_password("test-pass-123"), role="user")
+    db_session.add(user)
+    await db_session.flush()
+    await client.post("/auth/login", json={"email": email, "password": "test-pass-123"})
+
+
+async def test_create_session_without_cookie_returns_401(client: AsyncClient) -> None:
+    response = await client.post("/sessions")
+    assert response.status_code == 401
+
+
+async def test_create_session_with_cookie_returns_201_with_id(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _create_user_and_login(client, db_session, "ivan@example.com")
+
+    response = await client.post("/sessions")
+
+    assert response.status_code == 201
+    assert "id" in response.json()
+
+
+async def test_list_sessions_only_returns_own_sessions(client: AsyncClient, db_session: AsyncSession) -> None:
+    from api.db.models.user import User
+
+    owner = User(email="julia@example.com", password_hash=hash_password("test-pass-123"), role="user")
+    other = User(email="kim@example.com", password_hash=hash_password("test-pass-123"), role="user")
+    db_session.add_all([owner, other])
+    await db_session.flush()
+    db_session.add(ChatSession(user_id=owner.id))
+    db_session.add(ChatSession(user_id=other.id))
+    await db_session.flush()
+
+    await client.post("/auth/login", json={"email": "julia@example.com", "password": "test-pass-123"})
+    response = await client.get("/sessions")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+
+
+async def test_get_messages_for_other_users_session_returns_404(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    from api.db.models.user import User
+
+    owner = User(email="leo@example.com", password_hash=hash_password("test-pass-123"), role="user")
+    other = User(email="mia@example.com", password_hash=hash_password("test-pass-123"), role="user")
+    db_session.add_all([owner, other])
+    await db_session.flush()
+    other_session = ChatSession(user_id=other.id)
+    db_session.add(other_session)
+    await db_session.flush()
+
+    await client.post("/auth/login", json={"email": "leo@example.com", "password": "test-pass-123"})
+    response = await client.get(f"/sessions/{other_session.id}/messages")
+
+    assert response.status_code == 404
+
+
+async def test_post_message_streams_deltas_and_persists_both_messages(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _create_user_and_login(client, db_session, "nina@example.com")
+    create_response = await client.post("/sessions")
+    session_id = uuid.UUID(create_response.json()["id"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-local-agent-session-id"] == str(session_id)
+        return httpx.Response(200, content=_sse_body("Hello there!"))
+
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(handler)
+
+    response = await client.post(f"/sessions/{session_id}/messages", json={"content": "hi"})
+
+    assert response.status_code == 200
+    assert "event: delta" in response.text
+    assert "event: done" in response.text
+
+    messages_response = await client.get(f"/sessions/{session_id}/messages")
+    messages = messages_response.json()
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[0]["sequence_number"] < messages[1]["sequence_number"]
+    assert messages[1]["content"][0]["text"] == "Hello there!"
+
+
+async def test_post_message_when_llm_proxy_rejects_saves_no_assistant_message(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _create_user_and_login(client, db_session, "oscar@example.com")
+    create_response = await client.post("/sessions")
+    session_id = uuid.UUID(create_response.json()["id"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(402, json={"detail": "Monthly budget exceeded."})
+
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(handler)
+
+    response = await client.post(f"/sessions/{session_id}/messages", json={"content": "hi"})
+
+    assert response.status_code == 200
+    assert "event: error" in response.text
+    assert "budget" in response.text.lower()
+
+    result = await db_session.execute(select(Message).where(Message.session_id == session_id))
+    roles = [m.role for m in result.scalars()]
+    assert roles == ["user"]

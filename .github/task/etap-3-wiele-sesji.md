@@ -1,0 +1,57 @@
+# Etap 3 — Wiele sesji (SessionTaskManager, reconnect, cancel)
+
+## Kontekst
+
+Repo `local-agent`: samohostowana, wieloużytkownikowa platforma webowa do czatu, gdzie każda sesja czatu dostaje własny izolowany sandbox (kontener Podman rootless). Pełny plan wieloetapowy: `.github/task/plan-implmentacji.md`. Ten plik dotyczy tylko Etapu 3.
+
+Etap 1 (`etap-1-szkielet.md`) i Etap 2 (`etap-2-czat.md`) są zaimplementowane: `services/api` (auth, RBAC, `api/chat/{routes,schemas,streaming}.py`), `services/llm-proxy` (metering, backendy Anthropic/OpenAI), `libs/shared` (modele ORM współdzielone), `gui/src/features/chat/` (lista sesji, `ChatView.tsx`).
+
+Obecny stan `api/chat/streaming.py` / `routes.py`, zweryfikowany w kodzie: `POST /sessions/{id}/messages` woła `stream_chat_response(...)` bezpośrednio jako generator `StreamingResponse` — ta funkcja w jednym ciągu: strumieniuje z `llm-proxy`, tłumaczy zdarzenia, **i** zapisuje wiadomość asystenta do Postgresa na końcu, używając `db: AsyncSession` wstrzykniętego przez `Depends(get_db)` (a więc związanego z cyklem życia tego jednego żądania HTTP). Nie ma żadnego rejestru trwających generacji, żadnego fan-outu do wielu subskrybentów, żadnego endpointu do doczepienia się do już trwającego strumienia ani do anulowania. GUI (`ChatView.tsx`) też nie ma logiki reconnect — po prostu czyta strumień odpowiedzi własnego `POST`; odświeżenie karty w trakcie generacji dziś urywa wyświetlanie w połowie (zaakceptowane wprost jako ograniczenie Etapu 2).
+
+Zdecydowane wcześniej (nie do renegocjacji bez wyraźnego powodu): GUI↔api przez SSE, Postgres od dnia pierwszego, brak tokenów proxy/sesyjnych trzymanych w Postgresie. Na tym etapie **nadal nie ma** sandboksa (Etap 4) ani rejestru narzędzi/zatwierdzania (Etap 5) — to wciąż czysty streaming czatu tekstowego, tylko odporny na wiele kart i reconnect.
+
+## Zakres Etapu 3
+
+1. **`SessionTaskManager`** w `api/chat/streaming.py` — rejestr w pamięci procesu (`dict[session_id, ...]` na `app.state`, analogicznie do istniejącego `app.state.llm_proxy_client`), per `session_id`:
+   - `asyncio.Task` prowadzący generację (patrz punkt 2),
+   - lista `asyncio.Queue` subskrybentów (karty przeglądarki podłączone do tej generacji),
+   - bufor tekstu zakumulowanego dotąd (do replayu nowemu subskrybentowi).
+
+   API menedżera: `start(session_id, ...) -> Queue` (tworzy task i pierwszego subskrybenta; `409`, jeśli generacja już trwa dla tej sesji), `subscribe(session_id) -> Queue | None` (doczepia nowego subskrybenta do trwającego tasku, od razu wrzucając do jego kolejki syntetyczne zdarzenie `delta` z całym dotychczas zakumulowanym tekstem; `None`, jeśli nic nie trwa), `cancel(session_id) -> bool` (`task.cancel()`; `False`, jeśli nic nie trwa). Po zakończeniu tasku (sukces/błąd/cancel): menedżer sam usuwa wpis z rejestru i wysyła zdarzenie końcowe (`done`/`error`) do wszystkich aktualnych subskrybentów, żeby ich generatory `StreamingResponse` zamknęły się czysto.
+
+2. **Rozdzielenie `stream_chat_response`** na sterownik generacji niezwiązany z konkretnym żądaniem HTTP: dziś funkcja jednocześnie woła `llm-proxy`, tłumaczy zdarzenia i zapisuje wynik, korzystając z `db` przekazanego z `Depends(get_db)` — to działa tylko dopóki generacja żyje wyłącznie w ramach jednego requestu. Nowa wersja (`run_generation(...)`, uruchamiana jako `asyncio.Task` przez `SessionTaskManager.start`) musi: otworzyć **własną** sesję DB przez `AsyncSessionLocal()` (ten sam sessionmaker co `get_db`, ale niezależny od cyklu życia żadnego requestu — task musi przeżyć zamknięcie wszystkich kart przeglądarki), publikować każde zdarzenie do wszystkich aktualnych kolejek subskrybentów menedżera zamiast `yield`ować bezpośrednio do jednej `StreamingResponse`, i zapisać wiadomość asystenta **dokładnie raz** niezależnie od liczby subskrybentów. `httpx.AsyncClient` może zostać jak dziś — to już obiekt na `app.state`, nie request-scoped.
+
+3. **`POST /sessions/{id}/messages`**: zapisuje wiadomość użytkownika jak dziś, potem `SessionTaskManager.start(session_id, ...)` zamiast bezpośredniego wywołania generatora; `409 Conflict`, jeśli generacja dla tej sesji już trwa (jedna generacja na sesję naraz — tury czatu są z natury sekwencyjne, sequence_number i historia nie są zaprojektowane pod równoległe tury). Odpowiedź to `StreamingResponse` czytająca z kolejki subskrybenta zwróconej przez menedżera.
+
+4. **`GET /sessions/{id}/stream`** (nowy endpoint) — samo doczepienie, bez wysyłania nowej wiadomości: `SessionTaskManager.subscribe(session_id)`; `204 No Content` (nie SSE), jeśli nic aktualnie nie trwa, żeby GUI wiedziało, że ma pokazać tylko persystowaną historię bez otwierania strumienia.
+
+5. **`POST /sessions/{id}/cancel`** (nowy endpoint) — `SessionTaskManager.cancel(session_id)`; `404`/no-op, jeśli nic nie trwa. Anulowanie **nie** jest specjalnym przypadkiem względem dzisiejszej obsługi błędu: `run_generation` zapisuje to, co zdążyło się zakumulować do momentu anulowania (dokładnie tak jak dziś przy błędzie sieciowym z `llm-proxy` — patrz `streaming.py:91` — zapisuje częściowy tekst razem z wysłaniem zdarzenia błędu), zamiast wprowadzać osobną ścieżkę "wyrzuć częściowy tekst".
+
+6. **`GET /sessions/{id}/messages`**: dodać opcjonalny query param `after=<seq>` (filtr `sequence_number > after`) pod backfill przy reconnect, żeby karta nie musiała ściągać całej historii ponownie.
+
+7. **RBAC/ownership**: `GET /sessions/{id}/stream` i `POST /sessions/{id}/cancel` używają tego samego `_get_owned_session`, co istniejące endpointy — brak dostępu do generacji cudzej sesji.
+
+8. **GUI (`gui/src/features/chat/ChatView.tsx`, `api/client`)**: przy otwarciu/powrocie do sesji — `GET /sessions/{id}/messages?after=<ostatnio widziany seq>` (backfill), potem próba `GET /sessions/{id}/stream` (jeśli `204` — nic więcej do zrobienia; jeśli SSE — doczepienie i renderowanie na żywo od razu z replayowanym dotychczasowym tekstem). Istniejący `sendMessage` (POST) zostaje ścieżką na wysłanie nowej wiadomości. Dodać przycisk/akcję "Stop" wołającą `POST /cancel`. Wiele kart tej samej sesji działa bez żadnej koordynacji po stronie klienta — fan-out jest po stronie serwera.
+
+Poza zakresem (kolejne etapy): sandbox/Podman i realne narzędzia (Etap 4), rejestr narzędzi/zatwierdzanie tool-call (Etap 5), monitoring/dashboard (Etap 6), historia/fork/export (Etap 7), hardening/audit (Etap 8). Poziome skalowanie `api` do wielu procesów/workerów (rejestr `SessionTaskManager` w pamięci procesu zakłada jeden proces `api`) — zostaje przy dotychczasowej decyzji z planu głównego, że Postgres `LISTEN/NOTIFY` zastąpi to dopiero, gdy `api` faktycznie będzie musiał się skalować poziomo; nie teraz.
+
+## Kryteria akceptacji
+
+- Dwaj klienci SSE (dwie karty) podłączeni do tej samej sesji w trakcie jednej generacji (jeden przez `POST .../messages`, drugi przez `GET .../stream`) widzą identyczne delty tekstu i to samo zdarzenie końcowe.
+- Reconnect w trakcie streamu: nowa karta robi `GET .../messages?after=<seq>` (nic nowego, bo wiadomość asystenta jeszcze nie jest zapisana), potem `GET .../stream` — dostaje naraz cały dotychczas zakumulowany tekst jako replay, potem kontynuuje żywe delty, kończy tym samym zdarzeniem `done` i tą samą treścią finalnej wiadomości co karta, która zainicjowała generację.
+- `POST /sessions/{id}/messages` na sesji z już trwającą generacją → `409`, żaden nowy task nie startuje, wiadomość użytkownika z drugiego żądania nie zostaje zapisana / nie miesza sequence_number.
+- Niezależnie od liczby subskrybentów (0, 1 czy więcej) w bazie powstaje dokładnie jeden wiersz wiadomości asystenta na turę — brak duplikatów z wielokrotnej persystencji.
+- Zamknięcie wszystkich kart w trakcie generacji **nie** przerywa tasku — generacja kończy się i zapisuje wiadomość asystenta w tle, mimo zera aktywnych subskrybentów w danym momencie.
+- `POST /sessions/{id}/cancel` na sesji z trwającą generacją: task jest anulowany, subskrybenci dostają zdarzenie końcowe, a jeśli coś zdążyło się zakumulować — zapisane jest tak samo, jak dziś przy błędzie sieciowym (częściowy tekst + brak dalszego strumienia); na sesji bez trwającej generacji → no-op, nie 500.
+- `GET /sessions/{id}/stream` bez trwającej generacji → `204`, GUI nie zawiesza się czekając na SSE, które nigdy nie nadejdzie.
+- `GET/POST` na `stream`/`cancel` dla cudzej sesji → 403/404, tak jak istniejące endpointy czatu.
+- GUI: dwie karty przeglądarki na tej samej sesji, wysłanie wiadomości z jednej — druga widzi odpowiedź renderującą się na żywo bez odświeżania; odświeżenie karty w trakcie streamu pokazuje płynną kontynuację (replay + żywe delty), nie urwaną w połowie wiadomość jak w Etapie 2; przycisk "Stop" realnie przerywa generację.
+- `uv run pytest`: testy jednostkowe `SessionTaskManager` (fan-out do wielu kolejek, replay dla późnego subskrybenta, sprzątanie rejestru po zakończeniu, `409` przy podwójnym starcie, `cancel` na nieistniejącej generacji), test integracyjny `api/chat` z dwoma równoległymi klientami SSE na tej samej sesji.
+
+## Notatki implementacyjne
+
+- Sesja DB dla `run_generation` musi być otwierana samodzielnie przez `AsyncSessionLocal()` (ten sam sessionmaker co `get_db` w `api/db/session.py`), nie przez `Depends(get_db)` — task przeżywa zamknięcie żądania HTTP, które go uruchomiło, więc nie może dzielić z nim sesji DB związanej z cyklem życia tego requestu.
+- Anulowanie nie dostaje osobnej semantyki "odrzuć częściowy tekst" — celowo powiela istniejące zachowanie z obsługi błędu sieciowego w dzisiejszym `stream_chat_response` (persystuj to, co zakumulowane, razem z zdarzeniem końcowym), żeby nie wprowadzać dwóch różnych sposobów kończenia generacji.
+- Jedna trwająca generacja na sesję naraz (409 przy próbie drugiej) — świadome ograniczenie, nie tymczasowe niedopatrzenie: historia wiadomości i `sequence_number` nie są zaprojektowane pod równoległe tury w tej samej sesji.
+- Rejestr `SessionTaskManager` żyje w pamięci jednego procesu `api` (na `app.state`) — działa poprawnie tylko dopóki `api` nie skaluje się poziomo do wielu procesów/workerów; to świadomie zostawione tak, zgodnie z wcześniejszą decyzją z planu głównego (Postgres `LISTEN/NOTIFY` zamiast Redis dopiero, gdy `api` faktycznie musi się skalować poziomo) — nie do zmiany w tym etapie.
+- Format zdarzenia replay dla późnego subskrybenta: pojedyncze syntetyczne zdarzenie `delta` z całym dotychczasowym tekstem (nie seria historycznych fragmentów) — prościej po stronie klienta (jedno dopisanie do pustego bąbla wiadomości), spójne z tym, że GUI i tak renderuje `delta` jako dopisanie tekstu.
