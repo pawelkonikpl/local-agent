@@ -12,9 +12,18 @@ export interface ChatSession {
   updated_at: string
 }
 
+/** An Anthropic content block as persisted by the API: `text`, `tool_use` or `tool_result`. */
 export interface ContentBlock {
   type: string
   text?: string
+  // tool_use
+  id?: string
+  name?: string
+  input?: Record<string, unknown>
+  // tool_result
+  tool_use_id?: string
+  content?: string
+  is_error?: boolean
 }
 
 export interface ChatMessageOut {
@@ -24,6 +33,11 @@ export interface ChatMessageOut {
   role: 'user' | 'assistant' | 'system'
   content: ContentBlock[]
   created_at: string
+}
+
+export interface ChatModels {
+  models: string[]
+  default: string
 }
 
 export interface SessionUsage {
@@ -88,16 +102,40 @@ export function cancelGeneration(sessionId: string): Promise<void> {
   return request(`/sessions/${sessionId}/cancel`, { method: 'POST' })
 }
 
+export function listModels(): Promise<ChatModels> {
+  return request('/models')
+}
+
 export function getSessionUsage(sessionId: string): Promise<SessionUsage> {
   return request(`/sessions/${sessionId}/usage`)
 }
 
+export interface ToolCallEvent {
+  id: string
+  name: string
+  input: Record<string, unknown>
+}
+
+export interface ToolResultEvent {
+  id: string
+  content: string
+  is_error: boolean
+}
+
+/** Callbacks for the non-terminal events of a generation stream (see `api/chat/streaming.py`). */
+export interface StreamHandlers {
+  onDelta: (text: string) => void
+  onToolCall: (call: ToolCallEvent) => void
+  onToolResult: (result: ToolResultEvent) => void
+}
+
 /**
- * Reads a `text/event-stream` response incrementally, dispatching each `delta` frame and
- * throwing on `error` frames. Shared by `sendMessage` (POST, starts a generation) and
- * `attachToStream` (GET, attaches to one already running) since both speak the same wire format.
+ * Reads a `text/event-stream` response incrementally, dispatching `delta`, `tool_call` and
+ * `tool_result` frames and throwing on `error` frames. Shared by `sendMessage` (POST, starts a
+ * generation) and `attachToStream` (GET, attaches to one already running) since both speak the
+ * same wire format.
  */
-async function consumeEventStream(response: Response, onDelta: (text: string) => void): Promise<void> {
+async function consumeEventStream(response: Response, handlers: StreamHandlers): Promise<void> {
   if (!response.body) return
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
@@ -120,7 +158,11 @@ async function consumeEventStream(response: Response, onDelta: (text: string) =>
       if (!dataLine) continue
       const data = JSON.parse(dataLine)
       if (eventName === 'delta' && typeof data.text === 'string') {
-        onDelta(data.text)
+        handlers.onDelta(data.text)
+      } else if (eventName === 'tool_call') {
+        handlers.onToolCall(data as ToolCallEvent)
+      } else if (eventName === 'tool_result') {
+        handlers.onToolResult(data as ToolResultEvent)
       } else if (eventName === 'error') {
         throw new ApiError(0, data.message ?? 'Streaming error')
       }
@@ -136,13 +178,14 @@ async function consumeEventStream(response: Response, onDelta: (text: string) =>
 export async function sendMessage(
   sessionId: string,
   content: string,
-  onDelta: (text: string) => void,
+  model: string | undefined,
+  handlers: StreamHandlers,
 ): Promise<void> {
   const response = await fetch(`/sessions/${sessionId}/messages`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, model }),
   })
 
   if (!response.ok || !response.body) {
@@ -150,14 +193,15 @@ export async function sendMessage(
     throw new ApiError(response.status, body?.detail ?? response.statusText)
   }
 
-  await consumeEventStream(response, onDelta)
+  await consumeEventStream(response, handlers)
 }
 
 /**
  * Attaches to a session's in-progress generation, if any: `204` means nothing is running, so the
  * caller has nothing more to do beyond the persisted history it already has. Otherwise consumes
- * the stream exactly like `sendMessage` -- the server replays everything accumulated so far as one
- * `delta` before continuing live.
+ * the stream exactly like `sendMessage` -- the server replays everything published so far (tool
+ * calls and results in order, the text between them merged into one `delta` each) before
+ * continuing live.
  *
  * Returns `true` if there was a generation to attach to (the stream has now fully ended), `false`
  * on `204`. The server uses the exact message "Generation cancelled" for a `POST /cancel`-driven
@@ -166,7 +210,7 @@ export async function sendMessage(
  */
 export async function attachToStream(
   sessionId: string,
-  onDelta: (text: string) => void,
+  handlers: StreamHandlers,
 ): Promise<boolean> {
   const response = await fetch(`/sessions/${sessionId}/stream`, { credentials: 'include' })
   if (response.status === 204) return false
@@ -174,7 +218,7 @@ export async function attachToStream(
     const body = await response.json().catch(() => null)
     throw new ApiError(response.status, body?.detail ?? response.statusText)
   }
-  await consumeEventStream(response, onDelta)
+  await consumeEventStream(response, handlers)
   return true
 }
 

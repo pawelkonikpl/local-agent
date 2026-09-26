@@ -27,6 +27,13 @@ class MessageOut(BaseModel):
 
 class CreateMessageRequest(BaseModel):
     content: str = Field(min_length=1)
+    # One of `GET /models`; `None` means the configured default.
+    model: str | None = None
+
+
+class ModelsOut(BaseModel):
+    models: list[str]
+    default: str
 
 
 class SessionUsageOut(BaseModel):

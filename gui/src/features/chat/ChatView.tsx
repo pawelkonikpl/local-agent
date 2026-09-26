@@ -1,6 +1,13 @@
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 'react'
 import { useOutletContext, useParams } from 'react-router-dom'
-import type { ChatMessageOut, SessionUsage } from '../../api/client'
+import type {
+  ChatMessageOut,
+  ContentBlock,
+  SessionUsage,
+  StreamHandlers,
+  ToolCallEvent,
+  ToolResultEvent,
+} from '../../api/client'
 import {
   ApiError,
   attachToStream,
@@ -11,11 +18,23 @@ import {
 } from '../../api/client'
 import type { ChatOutletContext } from './ChatLayout'
 import Markdown from './Markdown'
+import { useChatModel } from './useChatModel'
+
+interface ToolCallView {
+  id: string
+  name: string
+  input: Record<string, unknown>
+  result?: string
+  isError?: boolean
+}
+
+// A bubble's content in order of occurrence: text interleaved with the tool calls between it.
+type DisplayPart = { kind: 'text'; text: string } | { kind: 'tool'; call: ToolCallView }
 
 interface DisplayMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
-  text: string
+  parts: DisplayPart[]
 }
 
 const ROLE_LABEL: Record<DisplayMessage['role'], string> = {
@@ -32,12 +51,126 @@ const CANCELLED_MESSAGE = 'Generation cancelled'
 // another tab) -- there's no push channel yet, so this is a deliberately simple poll.
 const WATCH_POLL_MS = 2000
 
-function toDisplayMessage(message: ChatMessageOut): DisplayMessage {
-  const text = message.content
-    .filter((block) => block.type === 'text' && block.text)
-    .map((block) => block.text)
-    .join('')
-  return { id: message.id, role: message.role, text }
+function toParts(content: ContentBlock[]): DisplayPart[] {
+  const parts: DisplayPart[] = []
+  for (const block of content) {
+    if (block.type === 'text' && block.text) {
+      parts.push({ kind: 'text', text: block.text })
+    } else if (block.type === 'tool_use' && block.id) {
+      parts.push({
+        kind: 'tool',
+        call: { id: block.id, name: block.name ?? '', input: block.input ?? {} },
+      })
+    }
+  }
+  return parts
+}
+
+function isToolResultsOnly(message: ChatMessageOut): boolean {
+  return (
+    message.role === 'user' &&
+    message.content.length > 0 &&
+    message.content.every((block) => block.type === 'tool_result')
+  )
+}
+
+/** Resolves the first still-pending call with `result.id` -- returns new parts, never mutates. */
+function withToolResult(parts: DisplayPart[], result: ToolResultEvent): DisplayPart[] {
+  let resolved = false
+  return parts.map((part) => {
+    if (
+      resolved ||
+      part.kind !== 'tool' ||
+      part.call.id !== result.id ||
+      part.call.result !== undefined
+    ) {
+      return part
+    }
+    resolved = true
+    return {
+      kind: 'tool',
+      call: { ...part.call, result: result.content, isError: result.is_error },
+    }
+  })
+}
+
+/**
+ * Maps persisted history to bubbles: one bubble per user turn, as it looks while streaming. A user
+ * message made only of `tool_result` blocks isn't a bubble -- its results are attached to the
+ * preceding assistant bubble's calls, and the assistant message after it continues that bubble.
+ */
+function toDisplayMessages(history: ChatMessageOut[]): DisplayMessage[] {
+  const display: DisplayMessage[] = []
+  let continuesAssistant = false
+  for (const message of history) {
+    const last = display[display.length - 1]
+    if (isToolResultsOnly(message)) {
+      if (last?.role === 'assistant') {
+        for (const block of message.content) {
+          last.parts = withToolResult(last.parts, {
+            id: block.tool_use_id ?? '',
+            content: block.content ?? '',
+            is_error: block.is_error ?? false,
+          })
+        }
+        continuesAssistant = true
+      }
+      continue
+    }
+    if (message.role === 'assistant' && continuesAssistant && last?.role === 'assistant') {
+      last.parts = [...last.parts, ...toParts(message.content)]
+    } else {
+      display.push({ id: message.id, role: message.role, parts: toParts(message.content) })
+    }
+    continuesAssistant = false
+  }
+  return display
+}
+
+function messageText(message: DisplayMessage): string {
+  return message.parts.map((part) => (part.kind === 'text' ? part.text : '')).join('')
+}
+
+function appendText(parts: DisplayPart[], text: string): DisplayPart[] {
+  const last = parts[parts.length - 1]
+  if (last?.kind !== 'text') return [...parts, { kind: 'text', text }]
+  return [...parts.slice(0, -1), { kind: 'text', text: last.text + text }]
+}
+
+type ToolCallState = 'running' | 'ok' | 'error' | 'interrupted'
+
+const TOOL_STATE_LABEL: Record<ToolCallState, string> = {
+  running: 'running…',
+  ok: 'ok',
+  error: 'error',
+  interrupted: 'no result',
+}
+
+function toolCallState(call: ToolCallView, isStreaming: boolean): ToolCallState {
+  if (call.result === undefined) return isStreaming ? 'running' : 'interrupted'
+  return call.isError ? 'error' : 'ok'
+}
+
+function ToolCall({ call, isStreaming }: { call: ToolCallView; isStreaming: boolean }) {
+  const state = toolCallState(call, isStreaming)
+  return (
+    <details className={`tool-call tool-call-${state}`}>
+      <summary>
+        <span className="tool-call-name">{call.name}</span>
+        <span className="tool-call-state">{TOOL_STATE_LABEL[state]}</span>
+      </summary>
+      <div className="tool-call-body">
+        <div className="tool-call-label">Input</div>
+        <pre>{JSON.stringify(call.input, null, 2)}</pre>
+        {call.result !== undefined && (
+          <>
+            <div className="tool-call-label">{call.isError ? 'Error' : 'Result'}</div>
+            <pre>{call.result}</pre>
+          </>
+        )}
+      </div>
+    </details>
+  )
 }
 
 function formatTime(iso: string): string {
@@ -68,6 +201,7 @@ export default function ChatView() {
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [usage, setUsage] = useState<SessionUsage | null>(null)
+  const { models, model, selectModel } = useChatModel()
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   // Which displayed message is the one currently receiving deltas -- set the moment a bubble is
@@ -89,13 +223,41 @@ export default function ChatView() {
     const id = `local-assistant-${Date.now()}`
     streamingIdRef.current = id
     setStreaming(true)
-    setMessages((prev) => [...prev, { id, role: 'assistant', text: '' }])
+    setMessages((prev) => [...prev, { id, role: 'assistant', parts: [] }])
+  }
+
+  function updateStreamingParts(update: (parts: DisplayPart[]) => DisplayPart[]) {
+    if (!streamingIdRef.current) beginAssistantBubble()
+    const id = streamingIdRef.current
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, parts: update(m.parts) } : m)))
   }
 
   function appendDelta(delta: string) {
-    if (!streamingIdRef.current) beginAssistantBubble()
-    const id = streamingIdRef.current
-    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, text: m.text + delta } : m)))
+    updateStreamingParts((parts) => appendText(parts, delta))
+  }
+
+  function appendToolCall(call: ToolCallEvent) {
+    updateStreamingParts((parts) => [...parts, { kind: 'tool', call }])
+  }
+
+  function applyToolResult(result: ToolResultEvent) {
+    updateStreamingParts((parts) => withToolResult(parts, result))
+  }
+
+  // Stream handlers that only touch the view while `forSessionId` is still the one on screen.
+  function handlersFor(forSessionId: string): StreamHandlers {
+    const isActive = () => activeSessionIdRef.current === forSessionId
+    return {
+      onDelta: (text) => {
+        if (isActive()) appendDelta(text)
+      },
+      onToolCall: (call) => {
+        if (isActive()) appendToolCall(call)
+      },
+      onToolResult: (result) => {
+        if (isActive()) applyToolResult(result)
+      },
+    }
   }
 
   // Best-effort: token usage is a secondary display, not core chat functionality, so a failed
@@ -129,14 +291,10 @@ export default function ChatView() {
     async function loadHistory() {
       const history = await listMessages(sessionId!)
       if (cancelled) return
-      const display = history.map(toDisplayMessage)
+      const display = toDisplayMessages(history)
       setMessages(display)
-      const firstUser = display.find((m) => m.role === 'user' && m.text.trim())
-      if (firstUser) registerFirstMessage(sessionId!, firstUser.text)
-    }
-
-    function onDelta(delta: string) {
-      if (activeSessionIdRef.current === sessionId) appendDelta(delta)
+      const firstUser = display.find((m) => m.role === 'user' && messageText(m).trim())
+      if (firstUser) registerFirstMessage(sessionId!, messageText(firstUser))
     }
 
     async function watchForGeneration() {
@@ -148,7 +306,7 @@ export default function ChatView() {
         requestInFlightRef.current = true
         let attached = false
         try {
-          attached = await attachToStream(sessionId!, onDelta)
+          attached = await attachToStream(sessionId!, handlersFor(sessionId!))
         } catch (err) {
           if (!cancelled && !isCancelledError(err)) {
             setError(err instanceof Error ? err.message : 'Streaming failed.')
@@ -215,7 +373,10 @@ export default function ChatView() {
     requestAnimationFrame(autoResize)
     setError(null)
     registerFirstMessage(mySessionId, userText)
-    setMessages((prev) => [...prev, { id: `local-user-${Date.now()}`, role: 'user', text: userText }])
+    setMessages((prev) => [
+      ...prev,
+      { id: `local-user-${Date.now()}`, role: 'user', parts: [{ kind: 'text', text: userText }] },
+    ])
     beginAssistantBubble()
 
     requestInFlightRef.current = true
@@ -224,9 +385,7 @@ export default function ChatView() {
       // same component with a new `sessionId` rather than remounting it), this send keeps running
       // in the background but must stop touching `messages`/`streaming` -- those now belong to
       // whatever session is on screen.
-      await sendMessage(mySessionId, userText, (delta) => {
-        if (activeSessionIdRef.current === mySessionId) appendDelta(delta)
-      })
+      await sendMessage(mySessionId, userText, model, handlersFor(mySessionId))
     } catch (err) {
       if (activeSessionIdRef.current === mySessionId && !isCancelledError(err)) {
         setError(err instanceof Error ? err.message : 'Streaming failed.')
@@ -272,24 +431,31 @@ export default function ChatView() {
 
       <div className="thread" aria-live="polite">
         <div className="thread-inner">
-          {messages.map((message) => (
-            <div className="msg" key={message.id}>
-              <span className={`avatar avatar-${message.role}`} aria-hidden="true">
-                {ROLE_LABEL[message.role].charAt(0)}
-              </span>
-              <div className="msg-body">
-                <div className="msg-head">
-                  <span className="msg-name">{ROLE_LABEL[message.role]}</span>
-                </div>
-                <div className="msg-text">
-                  <Markdown text={message.text} />
-                  {streaming && message.id === streamingIdRef.current && (
-                    <span className="cursor" aria-hidden="true" />
-                  )}
+          {messages.map((message) => {
+            const isStreaming = streaming && message.id === streamingIdRef.current
+            return (
+              <div className="msg" key={message.id}>
+                <span className={`avatar avatar-${message.role}`} aria-hidden="true">
+                  {ROLE_LABEL[message.role].charAt(0)}
+                </span>
+                <div className="msg-body">
+                  <div className="msg-head">
+                    <span className="msg-name">{ROLE_LABEL[message.role]}</span>
+                  </div>
+                  <div className="msg-text">
+                    {message.parts.map((part, index) =>
+                      part.kind === 'text' ? (
+                        <Markdown key={index} text={part.text} />
+                      ) : (
+                        <ToolCall key={index} call={part.call} isStreaming={isStreaming} />
+                      ),
+                    )}
+                    {isStreaming && <span className="cursor" aria-hidden="true" />}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
           <div ref={bottomRef} />
         </div>
       </div>
@@ -345,7 +511,29 @@ export default function ChatView() {
             </button>
           )}
         </form>
-        <p className="composer-hint">Enter to send · Shift+Enter for a new line</p>
+        <div className="composer-footer">
+          {models.length > 0 && (
+            <>
+              <label className="sr-only" htmlFor="chat-model-select">
+                Model
+              </label>
+              <select
+                id="chat-model-select"
+                className="model-select"
+                value={model}
+                onChange={(e) => selectModel(e.target.value)}
+                disabled={streaming}
+              >
+                {models.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
+          <p className="composer-hint">Enter to send · Shift+Enter for a new line</p>
+        </div>
       </div>
     </main>
   )

@@ -10,6 +10,7 @@ export default defineConfig({
     proxy: {
       '/auth': apiProxyTarget,
       '/admin': apiProxyTarget,
+      '^/models$': apiProxyTarget,
       // Exact match only: "/sessions/{id}" itself is a GUI page route (no such bare API
       // endpoint exists), so a browser refresh there must fall through to the SPA, not the API.
       '^/sessions$': apiProxyTarget,

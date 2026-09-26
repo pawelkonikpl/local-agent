@@ -606,6 +606,69 @@ body {
   background: transparent;
 }
 
+/* ---------- tool calls ---------- */
+
+.tool-call {
+  margin: 0.5em 0;
+  border: 1px solid var(--la-border);
+  border-radius: 10px;
+  background: var(--la-surface-2);
+  font-size: 12.5px;
+}
+
+.tool-call summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--la-text-dim);
+}
+
+.tool-call-name {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  color: var(--la-text);
+}
+
+.tool-call-state {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--la-text-faint);
+}
+
+.tool-call-error {
+  border-color: var(--la-danger);
+}
+.tool-call-error .tool-call-state {
+  color: var(--la-danger);
+}
+
+.tool-call-body {
+  padding: 4px 12px 10px;
+  border-top: 1px solid var(--la-border);
+}
+
+.tool-call-label {
+  margin: 8px 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--la-text-faint);
+}
+
+.tool-call pre {
+  margin: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: 6px;
+  background: var(--la-surface);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 /* highlight.js token colors, tuned for both color schemes */
 .hljs-keyword,
 .hljs-selector-tag,
@@ -774,9 +837,35 @@ body {
   color: var(--la-danger-soft);
 }
 
+.composer-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.model-select {
+  flex-shrink: 0;
+  max-width: 50%;
+  font-size: 11.5px;
+  color: var(--la-text-dim);
+  background: var(--la-surface);
+  border: 1px solid var(--la-border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+.model-select:hover:not(:disabled) {
+  border-color: var(--la-border-strong);
+}
+.model-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .composer-hint {
-  max-width: 100%;
-  margin: 6px auto 0;
+  flex: 1;
+  margin: 0;
   font-size: 11px;
   color: var(--la-text-faint);
   text-align: center;

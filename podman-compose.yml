@@ -26,16 +26,20 @@ services:
       ENVIRONMENT: development
       LLM_PROXY_URL: ${LLM_PROXY_URL:-http://llm-proxy:8080}
       INTERNAL_PROXY_TOKEN: ${INTERNAL_PROXY_TOKEN}
+      WEB_AGENT_URL: ${WEB_AGENT_URL:-http://web-agent:8080}
     depends_on:
       db:
         condition: service_healthy
       llm-proxy:
+        condition: service_started
+      web-agent:
         condition: service_started
     ports:
       - "8000:8000"
     networks:
       - core
       - edge
+      - web
 
   llm-proxy:
     build:
@@ -97,9 +101,70 @@ services:
     networks:
       - core
 
+  # A browser with internet access: only on `web` (shared with `api`), never on `core`, so it
+  # can't reach `db` or `llm-proxy`.
+  web-agent:
+    build:
+      context: .
+      dockerfile: deploy/Containerfile.web-agent
+    environment:
+      INTERNAL_PROXY_TOKEN: ${INTERNAL_PROXY_TOKEN}
+      WEB_AGENT_CDP_URL: ${WEB_AGENT_CDP_URL:-}
+      # DuckDuckGo blocks a headless browser, so in compose the browser searches our own SearXNG.
+      WEB_AGENT_ENGINE: ${WEB_AGENT_ENGINE:-searxng}
+      WEB_AGENT_SEARXNG_URL: http://searxng:8080
+    depends_on:
+      - searxng
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    shm_size: 256m
+    pids_limit: 512
+    mem_limit: 1536m
+    cpus: 2
+    user: "10001:10001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    ports:
+      - "8091:8080"
+    networks:
+      - web
+
+  # Private metasearch engine: it queries the public engines (Brave, Google, Wikipedia, ...) and
+  # web-agent's browser reads its results page. Only on `web`.
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-dev-searxng-secret-change-me}
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro,Z
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    pids_limit: 256
+    mem_limit: 512m
+    cpus: 1
+    ports:
+      - "8092:8080"
+    networks:
+      - web
+
 networks:
   core:
   edge:
+  web:
 
 volumes:
   db-data:

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth.security import hash_password
 from api.chat.routes import get_llm_proxy_client
+from api.config import settings
 from api.main import app
 from shared.db.models import ChatSession, Message, TokenUsage
 
@@ -206,3 +207,50 @@ async def test_get_usage_for_other_users_session_returns_404(
     response = await client.get(f"/sessions/{other_session.id}/usage")
 
     assert response.status_code == 404
+
+
+async def test_list_models_returns_default_first(client: AsyncClient, db_session: AsyncSession) -> None:
+    await _create_user_and_login(client, db_session, "quinn@example.com")
+
+    response = await client.get("/models")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["default"] == settings.chat_model
+    assert body["models"][0] == settings.chat_model
+
+
+async def test_post_message_forwards_the_chosen_model(client: AsyncClient, db_session: AsyncSession) -> None:
+    await _create_user_and_login(client, db_session, "rosa@example.com")
+    session_id = (await client.post("/sessions")).json()["id"]
+    chosen = settings.available_chat_models[-1]
+    sent_models: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent_models.append(json.loads(request.content)["model"])
+        return httpx.Response(200, content=_sse_body("ok"))
+
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(handler)
+
+    response = await client.post(f"/sessions/{session_id}/messages", json={"content": "hi", "model": chosen})
+
+    assert response.status_code == 200
+    assert sent_models == [chosen]
+
+
+async def test_post_message_with_unknown_model_returns_422_and_saves_nothing(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _create_user_and_login(client, db_session, "sam@example.com")
+    session_id = uuid.UUID((await client.post("/sessions")).json()["id"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("llm-proxy must not be called for an unknown model")
+
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(handler)
+
+    response = await client.post(f"/sessions/{session_id}/messages", json={"content": "hi", "model": "gpt-nope"})
+
+    assert response.status_code == 422
+    result = await db_session.execute(select(Message).where(Message.session_id == session_id))
+    assert list(result.scalars()) == []

@@ -1,0 +1,20 @@
+# Private SearXNG instance behind web-agent's `searxng` engine. Only reachable on the compose
+# `web` network (web-agent, api); it queries the public engines itself.
+use_default_settings: true
+
+general:
+  instance_name: local-agent search
+
+server:
+  # Overridden by SEARXNG_SECRET from the environment.
+  secret_key: "change-me"
+  # Private instance: no bot limiter (it would need Valkey/Redis) and no public-facing features.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json

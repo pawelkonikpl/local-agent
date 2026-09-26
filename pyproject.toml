@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["services/api", "services/llm-proxy", "libs/shared"]
+members = ["services/api", "services/llm-proxy", "services/web-agent", "libs/shared"]
 
 [dependency-groups]
 dev = [
@@ -9,5 +9,6 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["services/api/tests", "services/llm-proxy/tests"]
+testpaths = ["services/api/tests", "services/llm-proxy/tests", "services/web-agent/tests"]
 asyncio_mode = "auto"
+markers = ["browser: needs a local Chromium (uv run playwright install chromium); skipped otherwise"]

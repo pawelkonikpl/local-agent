@@ -22,9 +22,9 @@ def load() -> None:
 
 def count_prompt_tokens(messages: list[dict], tools: list[dict] | None = None) -> int:
     inputs = _tokenizer.apply_chat_template(
-        messages, tools=tools, add_generation_prompt=True, return_tensors="pt"
+        messages, tools=tools, add_generation_prompt=True, return_tensors="pt", return_dict=True
     )
-    return inputs.shape[-1]
+    return inputs["input_ids"].shape[-1]
 
 
 def count_generated_tokens(text: str) -> int:
