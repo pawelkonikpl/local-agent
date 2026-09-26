@@ -24,6 +24,9 @@ class LLMBackend(Protocol):
     emit a model's tool call as a `tool_use` block -- `content_block_start` with
     `{"type": "tool_use", "id", "name", "input": {}}`, then `content_block_delta` events with
     `input_json_delta` -- ending the message with `stop_reason: "tool_use"`.
+
+    Reasoning depth likewise travels as Anthropic's `output_config.effort`; a backend maps it
+    onto its provider's own knob (or passes it through, for Claude).
     """
 
     def stream(self, payload: dict, usage: UsageAccumulator) -> AsyncIterator[bytes]: ...

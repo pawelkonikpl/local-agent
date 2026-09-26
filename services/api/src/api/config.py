@@ -24,6 +24,18 @@ class Settings(BaseSettings):
         "gpt-6-luna",
         "local-model",
     ]
+    # Reasoning levels a user may pick per model, in Anthropic's `output_config.effort` vocabulary
+    # (llm-proxy maps it onto OpenAI's `reasoning.effort`). A model missing here offers no choice
+    # and runs at its provider's default. Only list levels the provider accepts for that model --
+    # Haiku 4.5 takes a token budget rather than an effort level, so it has none. Override with
+    # CHAT_MODEL_REASONING_EFFORTS (JSON).
+    chat_model_reasoning_efforts: dict[str, list[str]] = {
+        "claude-sonnet-5": ["low", "medium", "high", "xhigh", "max"],
+        "claude-opus-5-5": ["low", "medium", "high", "xhigh", "max"],
+        "gpt-6-sol": ["low", "medium", "high"],
+        "gpt-6-astra": ["low", "medium", "high"],
+        "gpt-6-luna": ["low", "medium", "high"],
+    }
     chat_max_tokens: int = 4096
 
     chat_tools_enabled: bool = True
@@ -39,6 +51,9 @@ class Settings(BaseSettings):
     @property
     def available_chat_models(self) -> list[str]:
         return [self.chat_model, *(model for model in self.chat_models if model != self.chat_model)]
+
+    def reasoning_efforts_for(self, model: str) -> list[str]:
+        return self.chat_model_reasoning_efforts.get(model, [])
 
     @property
     def cookie_secure(self) -> bool:

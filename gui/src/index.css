@@ -913,4 +913,8 @@ body {
   .chat-topbar {
     padding-left: 56px;
   }
+  /* Keyboard hint is moot on touch, and the model + reasoning pickers need the width. */
+  .composer-hint {
+    display: none;
+  }
 }

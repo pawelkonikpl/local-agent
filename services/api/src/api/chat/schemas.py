@@ -29,10 +29,18 @@ class CreateMessageRequest(BaseModel):
     content: str = Field(min_length=1)
     # One of `GET /models`; `None` means the configured default.
     model: str | None = None
+    # One of the chosen model's `reasoning_efforts`; `None` means the provider's default.
+    reasoning_effort: str | None = None
+
+
+class ModelOut(BaseModel):
+    id: str
+    # Empty when the model offers no reasoning setting.
+    reasoning_efforts: list[str]
 
 
 class ModelsOut(BaseModel):
-    models: list[str]
+    models: list[ModelOut]
     default: str
 
 

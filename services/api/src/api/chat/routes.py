@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.chat.history import build_llm_messages
-from api.chat.schemas import CreateMessageRequest, MessageOut, ModelsOut, SessionOut, SessionUsageOut
+from api.chat.schemas import CreateMessageRequest, MessageOut, ModelOut, ModelsOut, SessionOut, SessionUsageOut
 from api.chat.streaming import SessionTaskManager, run_generation, stream_queue
 from api.config import settings
 from api.db.session import get_db
@@ -41,7 +41,11 @@ async def _get_owned_session(session_id: uuid.UUID, user: User, db: AsyncSession
 
 @models_router.get("", response_model=ModelsOut)
 async def list_models(user: User = Depends(get_current_user)) -> ModelsOut:
-    return ModelsOut(models=settings.available_chat_models, default=settings.chat_model)
+    models = [
+        ModelOut(id=model, reasoning_efforts=settings.reasoning_efforts_for(model))
+        for model in settings.available_chat_models
+    ]
+    return ModelsOut(models=models, default=settings.chat_model)
 
 
 @router.post("", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
@@ -115,6 +119,11 @@ async def post_message(
     model = payload.model or settings.chat_model
     if model not in settings.available_chat_models:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown model: {model}")
+    effort = payload.reasoning_effort
+    if effort is not None and effort not in settings.reasoning_efforts_for(model):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, f"Reasoning effort {effort!r} is not supported by {model}"
+        )
 
     last_seq_result = await db.execute(
         select(func.max(Message.sequence_number)).where(Message.session_id == session.id)
@@ -145,6 +154,7 @@ async def post_message(
             client=client,
             tools=tools,
             model=model,
+            reasoning_effort=effort,
             first_sequence_number=last_seq + 2,
             anthropic_messages=anthropic_messages,
         ),

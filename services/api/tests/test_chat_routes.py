@@ -217,7 +217,17 @@ async def test_list_models_returns_default_first(client: AsyncClient, db_session
     assert response.status_code == 200
     body = response.json()
     assert body["default"] == settings.chat_model
-    assert body["models"][0] == settings.chat_model
+    assert body["models"][0]["id"] == settings.chat_model
+
+
+async def test_list_models_reports_reasoning_efforts_per_model(client: AsyncClient, db_session: AsyncSession) -> None:
+    await _create_user_and_login(client, db_session, "quincy@example.com")
+
+    response = await client.get("/models")
+
+    efforts = {model["id"]: model["reasoning_efforts"] for model in response.json()["models"]}
+    assert efforts["claude-sonnet-5"] == settings.chat_model_reasoning_efforts["claude-sonnet-5"]
+    assert efforts["local-model"] == []
 
 
 async def test_post_message_forwards_the_chosen_model(client: AsyncClient, db_session: AsyncSession) -> None:
@@ -236,6 +246,68 @@ async def test_post_message_forwards_the_chosen_model(client: AsyncClient, db_se
 
     assert response.status_code == 200
     assert sent_models == [chosen]
+
+
+async def test_post_message_forwards_reasoning_effort_as_output_config(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _create_user_and_login(client, db_session, "rory@example.com")
+    session_id = (await client.post("/sessions")).json()["id"]
+    sent_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent_payloads.append(json.loads(request.content))
+        return httpx.Response(200, content=_sse_body("ok"))
+
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(handler)
+
+    response = await client.post(
+        f"/sessions/{session_id}/messages",
+        json={"content": "hi", "model": "claude-sonnet-5", "reasoning_effort": "high"},
+    )
+
+    assert response.status_code == 200
+    assert [payload["output_config"] for payload in sent_payloads] == [{"effort": "high"}]
+
+
+async def test_post_message_without_reasoning_effort_sends_no_output_config(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _create_user_and_login(client, db_session, "ruth@example.com")
+    session_id = (await client.post("/sessions")).json()["id"]
+    sent_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent_payloads.append(json.loads(request.content))
+        return httpx.Response(200, content=_sse_body("ok"))
+
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(handler)
+
+    response = await client.post(f"/sessions/{session_id}/messages", json={"content": "hi", "model": "claude-sonnet-5"})
+
+    assert response.status_code == 200
+    assert "output_config" not in sent_payloads[0]
+
+
+async def test_post_message_with_unsupported_reasoning_effort_returns_422_and_saves_nothing(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _create_user_and_login(client, db_session, "sid@example.com")
+    session_id = uuid.UUID((await client.post("/sessions")).json()["id"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("llm-proxy must not be called for an unsupported reasoning effort")
+
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(handler)
+
+    response = await client.post(
+        f"/sessions/{session_id}/messages",
+        json={"content": "hi", "model": "local-model", "reasoning_effort": "high"},
+    )
+
+    assert response.status_code == 422
+    result = await db_session.execute(select(Message).where(Message.session_id == session_id))
+    assert list(result.scalars()) == []
 
 
 async def test_post_message_with_unknown_model_returns_422_and_saves_nothing(

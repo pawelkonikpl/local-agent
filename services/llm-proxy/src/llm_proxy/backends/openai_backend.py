@@ -3,31 +3,26 @@ from collections.abc import AsyncIterator
 import openai
 
 from llm_proxy.backends.base import UpstreamError
-from llm_proxy.backends.openai_translate import StreamTranslator, to_openai_messages, to_openai_tool_kwargs
+from llm_proxy.backends.openai_translate import StreamTranslator, to_openai_kwargs, to_openai_messages
 from llm_proxy.usage import UsageAccumulator
 
 
 class OpenAIBackend:
-    """Any provider speaking OpenAI's Chat Completions format natively -- real OpenAI, or a
-    self-hosted model exposing an OpenAI-compatible endpoint (this project's own `local-model`
-    service included). Translates the Anthropic request into Chat Completions (tools included,
-    via OpenAI's native `tools` / `tool_calls`) and the streamed chunks back into Anthropic
-    Messages SSE events, since that's the one contract session-agent's `anthropic` SDK
-    understands. See `openai_translate` for both directions.
+    """Any provider speaking OpenAI's Chat Completions format natively -- a self-hosted model
+    exposing an OpenAI-compatible endpoint, this project's own `local-model` service included.
+    (Real OpenAI goes through `OpenAIResponsesBackend` instead: Chat Completions refuses
+    function tools to its reasoning models.) Translates the Anthropic request into Chat
+    Completions (tools included, via OpenAI's native `tools` / `tool_calls`) and the streamed
+    chunks back into Anthropic Messages SSE events, since that's the one contract
+    session-agent's `anthropic` SDK understands. See `openai_translate` for both directions.
     """
 
-    def __init__(self, client: openai.AsyncOpenAI, model: str, *, disable_reasoning_with_tools: bool = False) -> None:
+    def __init__(self, client: openai.AsyncOpenAI, model: str) -> None:
         self._client = client
         self._model = model
-        self._disable_reasoning_with_tools = disable_reasoning_with_tools
 
     async def stream(self, payload: dict, usage: UsageAccumulator) -> AsyncIterator[bytes]:
         usage.model = self._model
-        tool_kwargs = to_openai_tool_kwargs(payload)
-        if tool_kwargs and self._disable_reasoning_with_tools:
-            # OpenAI's reasoning models reject function tools on /v1/chat/completions unless
-            # reasoning is switched off (tools + reasoning is only served by /v1/responses).
-            tool_kwargs["reasoning_effort"] = "none"
         try:
             completion_stream = await self._client.chat.completions.create(
                 model=self._model,
@@ -37,7 +32,7 @@ class OpenAIBackend:
                 max_completion_tokens=payload.get("max_tokens"),
                 stream=True,
                 stream_options={"include_usage": True},
-                **tool_kwargs,
+                **to_openai_kwargs(payload),
             )
         except openai.APIStatusError as exc:
             raise UpstreamError(exc.status_code, str(exc)) from exc

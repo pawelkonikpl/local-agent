@@ -14,6 +14,7 @@ from llm_proxy import metering
 from llm_proxy.backends.anthropic_backend import AnthropicBackend, build_anthropic_client
 from llm_proxy.backends.base import LLMBackend, UpstreamError
 from llm_proxy.backends.openai_backend import OpenAIBackend
+from llm_proxy.backends.openai_responses_backend import OpenAIResponsesBackend
 from llm_proxy.config import settings
 from llm_proxy.db import engine, get_db
 from llm_proxy.usage import UsageAccumulator
@@ -90,7 +91,7 @@ def _resolve_backend(
         return OpenAIBackend(local_model_client, settings.local_model_id)
     if openai_client is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OpenAI backend is not configured")
-    return OpenAIBackend(openai_client, model, disable_reasoning_with_tools=True)
+    return OpenAIResponsesBackend(openai_client, model)
 
 
 def create_app() -> FastAPI:

@@ -35,8 +35,14 @@ export interface ChatMessageOut {
   created_at: string
 }
 
+export interface ChatModel {
+  id: string
+  /** Reasoning levels this model accepts; empty when it offers no reasoning setting. */
+  reasoning_efforts: string[]
+}
+
 export interface ChatModels {
-  models: string[]
+  models: ChatModel[]
   default: string
 }
 
@@ -179,13 +185,14 @@ export async function sendMessage(
   sessionId: string,
   content: string,
   model: string | undefined,
+  reasoningEffort: string | undefined,
   handlers: StreamHandlers,
 ): Promise<void> {
   const response = await fetch(`/sessions/${sessionId}/messages`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content, model }),
+    body: JSON.stringify({ content, model, reasoning_effort: reasoningEffort }),
   })
 
   if (!response.ok || !response.body) {

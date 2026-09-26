@@ -195,6 +195,7 @@ async def run_generation(
     client: httpx.AsyncClient,
     tools: ToolRegistry,
     model: str,
+    reasoning_effort: str | None,
     first_sequence_number: int,
     anthropic_messages: list[dict],
 ) -> str | None:
@@ -232,6 +233,8 @@ async def run_generation(
             "messages": history,
             "stream": True,
         }
+        if reasoning_effort is not None:
+            payload["output_config"] = {"effort": reasoning_effort}
         if tool_definitions:
             payload["tools"] = tool_definitions
 

@@ -201,7 +201,8 @@ export default function ChatView() {
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [usage, setUsage] = useState<SessionUsage | null>(null)
-  const { models, model, selectModel } = useChatModel()
+  const { models, model, selectModel, reasoningEfforts, reasoningEffort, selectReasoningEffort } =
+    useChatModel()
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   // Which displayed message is the one currently receiving deltas -- set the moment a bubble is
@@ -385,7 +386,7 @@ export default function ChatView() {
       // same component with a new `sessionId` rather than remounting it), this send keeps running
       // in the background but must stop touching `messages`/`streaming` -- those now belong to
       // whatever session is on screen.
-      await sendMessage(mySessionId, userText, model, handlersFor(mySessionId))
+      await sendMessage(mySessionId, userText, model, reasoningEffort, handlersFor(mySessionId))
     } catch (err) {
       if (activeSessionIdRef.current === mySessionId && !isCancelledError(err)) {
         setError(err instanceof Error ? err.message : 'Streaming failed.')
@@ -524,9 +525,31 @@ export default function ChatView() {
                 onChange={(e) => selectModel(e.target.value)}
                 disabled={streaming}
               >
-                {models.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
+                {models.map(({ id }) => (
+                  <option key={id} value={id}>
+                    {id}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
+          {reasoningEfforts.length > 0 && (
+            <>
+              <label className="sr-only" htmlFor="chat-reasoning-select">
+                Reasoning
+              </label>
+              <select
+                id="chat-reasoning-select"
+                className="model-select"
+                value={reasoningEffort ?? ''}
+                onChange={(e) => selectReasoningEffort(e.target.value || undefined)}
+                disabled={streaming}
+                title="Reasoning effort"
+              >
+                <option value="">reasoning: default</option>
+                {reasoningEfforts.map((effort) => (
+                  <option key={effort} value={effort}>
+                    reasoning: {effort}
                   </option>
                 ))}
               </select>
