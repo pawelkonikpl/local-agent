@@ -90,7 +90,7 @@ def _resolve_backend(
         return OpenAIBackend(local_model_client, settings.local_model_id)
     if openai_client is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OpenAI backend is not configured")
-    return OpenAIBackend(openai_client, model)
+    return OpenAIBackend(openai_client, model, disable_reasoning_with_tools=True)
 
 
 def create_app() -> FastAPI:

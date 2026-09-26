@@ -16,20 +16,28 @@ class OpenAIBackend:
     understands. See `openai_translate` for both directions.
     """
 
-    def __init__(self, client: openai.AsyncOpenAI, model: str) -> None:
+    def __init__(self, client: openai.AsyncOpenAI, model: str, *, disable_reasoning_with_tools: bool = False) -> None:
         self._client = client
         self._model = model
+        self._disable_reasoning_with_tools = disable_reasoning_with_tools
 
     async def stream(self, payload: dict, usage: UsageAccumulator) -> AsyncIterator[bytes]:
         usage.model = self._model
+        tool_kwargs = to_openai_tool_kwargs(payload)
+        if tool_kwargs and self._disable_reasoning_with_tools:
+            # OpenAI's reasoning models reject function tools on /v1/chat/completions unless
+            # reasoning is switched off (tools + reasoning is only served by /v1/responses).
+            tool_kwargs["reasoning_effort"] = "none"
         try:
             completion_stream = await self._client.chat.completions.create(
                 model=self._model,
                 messages=to_openai_messages(payload),
-                max_tokens=payload.get("max_tokens"),
+                # `max_tokens` is deprecated and rejected by OpenAI's reasoning models; this cap
+                # also counts their hidden reasoning tokens, not just the visible answer.
+                max_completion_tokens=payload.get("max_tokens"),
                 stream=True,
                 stream_options={"include_usage": True},
-                **to_openai_tool_kwargs(payload),
+                **tool_kwargs,
             )
         except openai.APIStatusError as exc:
             raise UpstreamError(exc.status_code, str(exc)) from exc

@@ -50,9 +50,8 @@ def create_app() -> FastAPI:
 
         messages = to_template_messages(payload.get("messages", []))
         tools = to_template_tools(payload)
-        max_new_tokens = min(
-            payload.get("max_tokens") or settings.max_new_tokens_cap, settings.max_new_tokens_cap
-        )
+        requested_max = payload.get("max_completion_tokens") or payload.get("max_tokens")
+        max_new_tokens = min(requested_max or settings.max_new_tokens_cap, settings.max_new_tokens_cap)
         prompt_tokens = model_module.count_prompt_tokens(messages, tools)
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())

@@ -92,3 +92,11 @@ async def test_record_usage_accumulates_across_multiple_calls(
     counter = await db_session.get(UserUsageCounter, (seed_user, _PERIOD_START))
     assert counter is not None
     assert counter.spent_usd == Decimal("1.60")
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [("gpt-6-astra", Decimal("60")), ("gpt-6-sol", Decimal("12")), ("gpt-6-luna", Decimal("0.60"))],
+)
+def test_estimate_cost_usd_prices_openai_models_by_their_own_tier(model: str, expected: Decimal) -> None:
+    assert metering.estimate_cost_usd(model, 1_000_000, 1_000_000) == expected

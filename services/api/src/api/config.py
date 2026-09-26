@@ -13,8 +13,17 @@ class Settings(BaseSettings):
     internal_proxy_token: str
     chat_model: str = "claude-sonnet-5"
     # Models a user may pick per message; llm-proxy routes each by name (see its `_resolve_backend`).
-    # `chat_model` is the default and is always offered, even if missing here.
-    chat_models: list[str] = ["claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5-20251001", "local-model"]
+    # `chat_model` is the default and is always offered, even if missing here. The `gpt-*` ones
+    # need OPENAI_API_KEY set on llm-proxy (otherwise it answers 503); override with CHAT_MODELS.
+    chat_models: list[str] = [
+        "claude-sonnet-5",
+        "claude-opus-5-5",
+        "claude-haiku-4-5-20251001",
+        "gpt-6-sol",
+        "gpt-6-astra",
+        "gpt-6-luna",
+        "local-model",
+    ]
     chat_max_tokens: int = 4096
 
     chat_tools_enabled: bool = True

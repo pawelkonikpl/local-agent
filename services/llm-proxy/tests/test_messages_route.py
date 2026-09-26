@@ -188,10 +188,13 @@ async def test_create_message_routes_non_claude_model_through_openai_backend(
     db_session.add(ChatSession(id=session_id, user_id=seed_user))
     await db_session.flush()
 
+    sent: dict = {}
+
     def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.update(json.loads(request.content))
         return httpx2.Response(
             200,
-            content=_openai_sse_body("Hi from GPT!", 9, 3, "gpt-4o-mini"),
+            content=_openai_sse_body("Hi from GPT!", 9, 3, "gpt-6-sol"),
             headers={"content-type": "text/event-stream"},
         )
 
@@ -201,7 +204,7 @@ async def test_create_message_routes_non_claude_model_through_openai_backend(
         "/v1/messages",
         headers=_auth_headers(seed_user, session_id),
         json={
-            "model": "gpt-4o-mini",
+            "model": "gpt-6-sol",
             "max_tokens": 100,
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
         },
@@ -209,10 +212,13 @@ async def test_create_message_routes_non_claude_model_through_openai_backend(
 
     assert response.status_code == 200
     assert "Hi from GPT!" in response.text
+    # Reasoning models reject the deprecated `max_tokens`.
+    assert sent["max_completion_tokens"] == 100
+    assert "max_tokens" not in sent
 
     counter = await db_session.get(UserUsageCounter, (seed_user, _PERIOD_START))
     assert counter is not None
-    expected = metering.estimate_cost_usd("gpt-4o-mini", 9, 3).quantize(
+    expected = metering.estimate_cost_usd("gpt-6-sol", 9, 3).quantize(
         Decimal("0.0001"), rounding=ROUND_HALF_UP
     )
     assert counter.spent_usd == expected
@@ -246,6 +252,83 @@ async def test_create_message_routes_local_model_alias_through_openai_backend(
 
     assert response.status_code == 200
     assert "Hi from local model!" in response.text
+
+
+_WEATHER_TOOL = {
+    "name": "get_weather",
+    "description": "Current weather for a city",
+    "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+}
+
+
+async def test_create_message_with_tools_disables_reasoning_for_openai(
+    client: AsyncClient, db_session: AsyncSession, seed_user: uuid.UUID
+) -> None:
+    session_id = uuid.uuid4()
+    db_session.add(ChatSession(id=session_id, user_id=seed_user))
+    await db_session.flush()
+
+    sent: dict = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.update(json.loads(request.content))
+        return httpx2.Response(
+            200,
+            content=_openai_sse_body("Hi from GPT!", 9, 3, "gpt-6-sol"),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    app.dependency_overrides[get_openai_client] = lambda: _mock_openai_client(handler)
+
+    response = await client.post(
+        "/v1/messages",
+        headers=_auth_headers(seed_user, session_id),
+        json={
+            "model": "gpt-6-sol",
+            "max_tokens": 100,
+            "tools": [_WEATHER_TOOL],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        },
+    )
+
+    assert response.status_code == 200
+    # Reasoning models reject function tools on /v1/chat/completions unless reasoning is off.
+    assert sent["reasoning_effort"] == "none"
+    assert sent["tools"][0]["function"]["name"] == "get_weather"
+
+
+async def test_create_message_with_tools_keeps_local_model_request_untouched(
+    client: AsyncClient, db_session: AsyncSession, seed_user: uuid.UUID
+) -> None:
+    session_id = uuid.uuid4()
+    db_session.add(ChatSession(id=session_id, user_id=seed_user))
+    await db_session.flush()
+
+    sent: dict = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.update(json.loads(request.content))
+        return httpx2.Response(
+            200,
+            content=_openai_sse_body("Hi from local model!", 5, 2, settings.local_model_id),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    app.dependency_overrides[get_local_model_client] = lambda: _mock_openai_client(handler)
+
+    response = await client.post(
+        "/v1/messages",
+        headers=_auth_headers(seed_user, session_id),
+        json={
+            "model": "local-model",
+            "max_tokens": 100,
+            "tools": [_WEATHER_TOOL],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert "reasoning_effort" not in sent
 
 
 async def test_create_message_returns_503_when_openai_backend_not_configured(

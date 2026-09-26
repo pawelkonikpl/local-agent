@@ -9,12 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shared.db.models import TokenUsage, UserUsageCounter, UserUsageLimit
 
 # Approximate list prices in USD per million tokens (input, output), matched by substring
-# against the model id. Adjust to your actual Anthropic plan; unknown models fall back to
-# the "sonnet" tier so an unrecognized/new model id still gets metered rather than skipped.
+# against the model id. Adjust to your actual Anthropic/OpenAI plans; unknown models fall back
+# to the "sonnet" tier so an unrecognized/new model id still gets metered rather than skipped.
 _PRICING_PER_MTOK_USD: dict[str, tuple[Decimal, Decimal]] = {
     "opus": (Decimal("15"), Decimal("75")),
     "sonnet": (Decimal("3"), Decimal("15")),
     "haiku": (Decimal("0.80"), Decimal("4")),
+    "gpt-6-astra": (Decimal("10"), Decimal("50")),
+    "gpt-6-sol": (Decimal("2"), Decimal("10")),
+    "gpt-6-luna": (Decimal("0.10"), Decimal("0.50")),
 }
 _DEFAULT_PRICING = _PRICING_PER_MTOK_USD["sonnet"]
 
