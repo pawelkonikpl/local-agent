@@ -26,6 +26,12 @@ export interface ChatMessageOut {
   created_at: string
 }
 
+export interface SessionUsage {
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+}
+
 class ApiError extends Error {
   status: number
 
@@ -73,32 +79,26 @@ export function createSession(): Promise<ChatSession> {
   return request('/sessions', { method: 'POST' })
 }
 
-export function listMessages(sessionId: string): Promise<ChatMessageOut[]> {
-  return request(`/sessions/${sessionId}/messages`)
+export function listMessages(sessionId: string, after?: number): Promise<ChatMessageOut[]> {
+  const query = after !== undefined ? `?after=${after}` : ''
+  return request(`/sessions/${sessionId}/messages${query}`)
+}
+
+export function cancelGeneration(sessionId: string): Promise<void> {
+  return request(`/sessions/${sessionId}/cancel`, { method: 'POST' })
+}
+
+export function getSessionUsage(sessionId: string): Promise<SessionUsage> {
+  return request(`/sessions/${sessionId}/usage`)
 }
 
 /**
- * Posts a chat message and consumes the `text/event-stream` reply as it arrives.
- * Not built on `request()`: that helper always parses one JSON body, but this response is a
- * live stream of `event:`/`data:` frames read incrementally via the fetch body reader.
+ * Reads a `text/event-stream` response incrementally, dispatching each `delta` frame and
+ * throwing on `error` frames. Shared by `sendMessage` (POST, starts a generation) and
+ * `attachToStream` (GET, attaches to one already running) since both speak the same wire format.
  */
-export async function sendMessage(
-  sessionId: string,
-  content: string,
-  onDelta: (text: string) => void,
-): Promise<void> {
-  const response = await fetch(`/sessions/${sessionId}/messages`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
-  })
-
-  if (!response.ok || !response.body) {
-    const body = await response.json().catch(() => null)
-    throw new ApiError(response.status, body?.detail ?? response.statusText)
-  }
-
+async function consumeEventStream(response: Response, onDelta: (text: string) => void): Promise<void> {
+  if (!response.body) return
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -126,6 +126,56 @@ export async function sendMessage(
       }
     }
   }
+}
+
+/**
+ * Posts a chat message and consumes the `text/event-stream` reply as it arrives.
+ * Not built on `request()`: that helper always parses one JSON body, but this response is a
+ * live stream of `event:`/`data:` frames read incrementally via the fetch body reader.
+ */
+export async function sendMessage(
+  sessionId: string,
+  content: string,
+  onDelta: (text: string) => void,
+): Promise<void> {
+  const response = await fetch(`/sessions/${sessionId}/messages`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  })
+
+  if (!response.ok || !response.body) {
+    const body = await response.json().catch(() => null)
+    throw new ApiError(response.status, body?.detail ?? response.statusText)
+  }
+
+  await consumeEventStream(response, onDelta)
+}
+
+/**
+ * Attaches to a session's in-progress generation, if any: `204` means nothing is running, so the
+ * caller has nothing more to do beyond the persisted history it already has. Otherwise consumes
+ * the stream exactly like `sendMessage` -- the server replays everything accumulated so far as one
+ * `delta` before continuing live.
+ *
+ * Returns `true` if there was a generation to attach to (the stream has now fully ended), `false`
+ * on `204`. The server uses the exact message "Generation cancelled" for a `POST /cancel`-driven
+ * termination (see `run_generation` in `api/chat/streaming.py`), so callers can tell that apart
+ * from a genuine upstream error.
+ */
+export async function attachToStream(
+  sessionId: string,
+  onDelta: (text: string) => void,
+): Promise<boolean> {
+  const response = await fetch(`/sessions/${sessionId}/stream`, { credentials: 'include' })
+  if (response.status === 204) return false
+  if (!response.ok || !response.body) {
+    const body = await response.json().catch(() => null)
+    throw new ApiError(response.status, body?.detail ?? response.statusText)
+  }
+  await consumeEventStream(response, onDelta)
+  return true
 }
 
 export { ApiError }

@@ -769,6 +769,11 @@ body {
   opacity: 0.88;
 }
 
+.stop-btn {
+  background: var(--la-danger);
+  color: var(--la-danger-soft);
+}
+
 .composer-hint {
   max-width: 100%;
   margin: 6px auto 0;

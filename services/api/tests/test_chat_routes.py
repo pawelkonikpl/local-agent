@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.auth.security import hash_password
 from api.chat.routes import get_llm_proxy_client
 from api.main import app
-from shared.db.models import ChatSession, Message
+from shared.db.models import ChatSession, Message, TokenUsage
 
 
 def _sse_body(text: str) -> bytes:
@@ -148,3 +148,61 @@ async def test_post_message_when_llm_proxy_rejects_saves_no_assistant_message(
     result = await db_session.execute(select(Message).where(Message.session_id == session_id))
     roles = [m.role for m in result.scalars()]
     assert roles == ["user"]
+
+
+async def test_get_usage_sums_token_usage_rows_for_the_session(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    from api.db.models.user import User
+
+    user = User(email="paula@example.com", password_hash=hash_password("test-pass-123"), role="user")
+    db_session.add(user)
+    await db_session.flush()
+    session = ChatSession(user_id=user.id)
+    db_session.add(session)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            TokenUsage(session_id=session.id, user_id=user.id, model="claude-sonnet-5", input_tokens=10, output_tokens=5),
+            TokenUsage(session_id=session.id, user_id=user.id, model="claude-sonnet-5", input_tokens=20, output_tokens=8),
+        ]
+    )
+    await db_session.flush()
+
+    await client.post("/auth/login", json={"email": "paula@example.com", "password": "test-pass-123"})
+    response = await client.get(f"/sessions/{session.id}/usage")
+
+    assert response.status_code == 200
+    assert response.json() == {"input_tokens": 30, "output_tokens": 13, "total_tokens": 43}
+
+
+async def test_get_usage_with_no_recorded_tokens_returns_zeros(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _create_user_and_login(client, db_session, "quinn@example.com")
+    create_response = await client.post("/sessions")
+    session_id = create_response.json()["id"]
+
+    response = await client.get(f"/sessions/{session_id}/usage")
+
+    assert response.status_code == 200
+    assert response.json() == {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+
+async def test_get_usage_for_other_users_session_returns_404(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    from api.db.models.user import User
+
+    owner = User(email="rex@example.com", password_hash=hash_password("test-pass-123"), role="user")
+    other = User(email="sara@example.com", password_hash=hash_password("test-pass-123"), role="user")
+    db_session.add_all([owner, other])
+    await db_session.flush()
+    other_session = ChatSession(user_id=other.id)
+    db_session.add(other_session)
+    await db_session.flush()
+
+    await client.post("/auth/login", json={"email": "rex@example.com", "password": "test-pass-123"})
+    response = await client.get(f"/sessions/{other_session.id}/usage")
+
+    assert response.status_code == 404

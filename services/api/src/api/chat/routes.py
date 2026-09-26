@@ -1,23 +1,27 @@
 import uuid
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.chat.schemas import CreateMessageRequest, MessageOut, SessionOut
-from api.chat.streaming import stream_chat_response
+from api.chat.schemas import CreateMessageRequest, MessageOut, SessionOut, SessionUsageOut
+from api.chat.streaming import SessionTaskManager, run_generation, stream_queue
 from api.db.session import get_db
 from api.deps import get_current_user
 from api.db.models.user import User
-from shared.db.models import ChatSession, Message
+from shared.db.models import ChatSession, Message, TokenUsage
 
 router = APIRouter(prefix="/sessions", tags=["chat"])
 
 
 async def get_llm_proxy_client(request: Request) -> httpx.AsyncClient:
     return request.app.state.llm_proxy_client
+
+
+async def get_session_task_manager(request: Request) -> SessionTaskManager:
+    return request.app.state.session_task_manager
 
 
 async def _get_owned_session(session_id: uuid.UUID, user: User, db: AsyncSession) -> ChatSession:
@@ -51,14 +55,37 @@ async def list_sessions(
 @router.get("/{session_id}/messages", response_model=list[MessageOut])
 async def list_messages(
     session_id: uuid.UUID,
+    after: int | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[Message]:
     await _get_owned_session(session_id, user, db)
-    result = await db.execute(
-        select(Message).where(Message.session_id == session_id).order_by(Message.sequence_number)
-    )
+    stmt = select(Message).where(Message.session_id == session_id)
+    if after is not None:
+        stmt = stmt.where(Message.sequence_number > after)
+    result = await db.execute(stmt.order_by(Message.sequence_number))
     return list(result.scalars())
+
+
+@router.get("/{session_id}/usage", response_model=SessionUsageOut)
+async def get_session_usage(
+    session_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SessionUsageOut:
+    await _get_owned_session(session_id, user, db)
+    result = await db.execute(
+        select(
+            func.coalesce(func.sum(TokenUsage.input_tokens), 0),
+            func.coalesce(func.sum(TokenUsage.output_tokens), 0),
+        ).where(TokenUsage.session_id == session_id)
+    )
+    input_tokens, output_tokens = result.one()
+    return SessionUsageOut(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+    )
 
 
 @router.post("/{session_id}/messages")
@@ -68,6 +95,7 @@ async def post_message(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     client: httpx.AsyncClient = Depends(get_llm_proxy_client),
+    manager: SessionTaskManager = Depends(get_session_task_manager),
 ) -> StreamingResponse:
     session = await _get_owned_session(session_id, user, db)
 
@@ -86,6 +114,20 @@ async def post_message(
     ]
     anthropic_messages.append({"role": "user", "content": [{"type": "text", "text": payload.content}]})
 
+    # Raises 409 if a generation is already in progress -- do this before persisting the user
+    # message, so a rejected second POST doesn't consume a sequence_number or get saved.
+    queue = manager.start(
+        session.id,
+        run_generation(
+            manager,
+            session_id=session.id,
+            user_id=user.id,
+            client=client,
+            assistant_sequence_number=last_seq + 2,
+            anthropic_messages=anthropic_messages,
+        ),
+    )
+
     db.add(
         Message(
             session_id=session.id,
@@ -96,12 +138,30 @@ async def post_message(
     )
     await db.commit()
 
-    generator = stream_chat_response(
-        client,
-        db,
-        session_id=session.id,
-        user_id=user.id,
-        assistant_sequence_number=last_seq + 2,
-        anthropic_messages=anthropic_messages,
-    )
-    return StreamingResponse(generator, media_type="text/event-stream")
+    return StreamingResponse(stream_queue(queue), media_type="text/event-stream")
+
+
+@router.get("/{session_id}/stream")
+async def stream_session(
+    session_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    manager: SessionTaskManager = Depends(get_session_task_manager),
+) -> Response:
+    await _get_owned_session(session_id, user, db)
+    queue = manager.subscribe(session_id)
+    if queue is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return StreamingResponse(stream_queue(queue), media_type="text/event-stream")
+
+
+@router.post("/{session_id}/cancel", status_code=status.HTTP_204_NO_CONTENT)
+async def cancel_session(
+    session_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    manager: SessionTaskManager = Depends(get_session_task_manager),
+) -> Response:
+    await _get_owned_session(session_id, user, db)
+    manager.cancel(session_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

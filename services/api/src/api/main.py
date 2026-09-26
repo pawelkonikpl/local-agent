@@ -8,6 +8,7 @@ from sqlalchemy import text
 from api.admin.routes import router as admin_router
 from api.auth.routes import router as auth_router
 from api.chat.routes import router as chat_router
+from api.chat.streaming import SessionTaskManager
 from api.config import settings
 from api.db.session import engine
 
@@ -25,6 +26,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="local-agent api", lifespan=lifespan)
+    # Unlike `llm_proxy_client`, this needs no async setup/teardown, so it's created directly
+    # here rather than in `lifespan` -- that keeps it available in tests that build the app via
+    # ASGITransport without running lifespan events.
+    app.state.session_task_manager = SessionTaskManager()
     app.include_router(auth_router)
     app.include_router(admin_router)
     app.include_router(chat_router)

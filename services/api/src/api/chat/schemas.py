@@ -27,3 +27,9 @@ class MessageOut(BaseModel):
 
 class CreateMessageRequest(BaseModel):
     content: str = Field(min_length=1)
+
+
+class SessionUsageOut(BaseModel):
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int

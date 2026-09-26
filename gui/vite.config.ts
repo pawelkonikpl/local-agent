@@ -13,7 +13,9 @@ export default defineConfig({
       // Exact match only: "/sessions/{id}" itself is a GUI page route (no such bare API
       // endpoint exists), so a browser refresh there must fall through to the SPA, not the API.
       '^/sessions$': apiProxyTarget,
-      '^/sessions/[^/]+/messages$': apiProxyTarget,
+      '^/sessions/[^/]+/messages(\\?.*)?$': apiProxyTarget,
+      '^/sessions/[^/]+/stream$': apiProxyTarget,
+      '^/sessions/[^/]+/cancel$': apiProxyTarget,
     },
   },
 })
