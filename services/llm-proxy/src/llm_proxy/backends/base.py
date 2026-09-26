@@ -18,6 +18,12 @@ class LLMBackend(Protocol):
     session-agent's `anthropic` SDK understands, regardless of which provider actually served
     the request. Raises `UpstreamError` if the upstream rejects the request before any bytes
     are streamed back.
+
+    Tool calling is part of the contract, implemented natively per provider: a backend must
+    accept `tools` / `tool_choice` and `tool_use` / `tool_result` blocks in `messages`, and
+    emit a model's tool call as a `tool_use` block -- `content_block_start` with
+    `{"type": "tool_use", "id", "name", "input": {}}`, then `content_block_delta` events with
+    `input_json_delta` -- ending the message with `stop_reason: "tool_use"`.
     """
 
     def stream(self, payload: dict, usage: UsageAccumulator) -> AsyncIterator[bytes]: ...
