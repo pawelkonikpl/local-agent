@@ -2,7 +2,8 @@ import re
 
 import httpx
 
-from api.tools.base import ToolInputError, ToolResult
+from api.tools.base import Capability, ToolInputError, ToolResult
+from api.tools.web_common import WITHHELD_NOTE, format_result, spotlight
 
 DEFAULT_MAX_RESULTS = 5
 MAX_RESULTS_LIMIT = 10
@@ -44,6 +45,8 @@ class WebSearchTool:
         "required": ["query"],
         "additionalProperties": False,
     }
+    # The query leaves for public search engines; the results are page text.
+    capabilities: frozenset[Capability] = frozenset({"reads_untrusted", "external_effect"})
 
     def __init__(
         self,
@@ -98,12 +101,13 @@ def _format(body: dict) -> ToolResult:
     status = body.get("status")
     query = body.get("query", "")
     if status == "ok":
+        results = body.get("results", [])
         lines = [f'Web results for "{query}":']
-        for result in body.get("results", []):
-            lines.append(f"{result['rank']}. {result['title']}\n   {result['url']}")
-            if result.get("snippet"):
-                lines.append(f"   {result['snippet']}")
-        return ToolResult("\n".join(lines))
+        for result in results:
+            lines.extend(format_result(result))
+        if any(result.get("withheld") for result in results):
+            lines.append(WITHHELD_NOTE)
+        return ToolResult(spotlight("\n".join(lines), source="web_search"))
     if status == "no_results":
         return ToolResult(f'No web results for "{query}".')
     if status == "blocked":

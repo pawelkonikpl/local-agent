@@ -11,6 +11,9 @@ class SearchEngine(Protocol):
     """
 
     name: str
+    # Origins besides the results page's own that the page needs to render (e.g. a script CDN).
+    # The browser refuses every other origin; only code sets this, never a page or the model.
+    extra_origins: frozenset[str]
     # JS expression evaluated in the results page; returns `[{title, href, snippet, is_ad}]`.
     extract_js: str
 

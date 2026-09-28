@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from api.config import settings
 from api.tools.base import Tool, ToolInputError, ToolResult
 from api.tools.current_time import CurrentTimeTool
+from api.tools.guard import GenerationGuard
 from api.tools.web_search import WebSearchTool
 
 logger = logging.getLogger(__name__)
@@ -34,20 +35,34 @@ class ToolRegistry:
             for tool in self._tools.values()
         ]
 
-    async def execute(self, name: str, input: dict) -> ToolResult:
+    def reads_untrusted(self) -> bool:
+        """Whether any offered tool brings untrusted (web) content into the conversation."""
+        return any("reads_untrusted" in tool.capabilities for tool in self._tools.values())
+
+    async def execute(self, name: str, input: dict, *, guard: GenerationGuard | None = None) -> ToolResult:
+        """Run `name`; with a `guard`, only if its policy allows the call.
+
+        A refused call never reaches the tool and comes back as an error result; the alarm is
+        logged without the input, which may hold the user's data.
+        """
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(f"Unknown tool: {name}", is_error=True)
+        if guard is not None and (reason := guard.check(tool, input)):
+            logger.warning("security_alert tool=%s reason=%s", name, reason)
+            return ToolResult(f"Blocked by security policy: {reason}", is_error=True)
         try:
             async with asyncio.timeout(self._timeout_s):
                 result = await tool.run(input)
         except ToolInputError as exc:
             return ToolResult(f"Invalid input: {exc}", is_error=True)
         except TimeoutError:
-            return ToolResult(f"Tool timed out after {self._timeout_s:g}s", is_error=True)
+            result = ToolResult(f"Tool timed out after {self._timeout_s:g}s", is_error=True)
         except Exception as exc:
             logger.exception("Tool %s failed", name)
-            return ToolResult(f"Tool failed: {type(exc).__name__}: {exc}", is_error=True)
+            result = ToolResult(f"Tool failed: {type(exc).__name__}: {exc}", is_error=True)
+        if guard is not None:
+            guard.after(tool, result)
         return self._truncate(result)
 
     def _truncate(self, result: ToolResult) -> ToolResult:

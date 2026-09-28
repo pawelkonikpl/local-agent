@@ -4,11 +4,13 @@ into clean, deduplicated `SearchResult`s."""
 import json
 import re
 from collections.abc import Callable
-from urllib.parse import urldefrag, urlparse
+from urllib.parse import urldefrag, urlparse, urlunparse
 
+from web_agent.guard import domain_signals, injection_signals, sanitize
 from web_agent.models import SearchResult
 
 SNIPPET_MAX_CHARS = 300
+WITHHELD_URL_MAX_CHARS = 200
 BLOCKING_STATUSES = frozenset({403, 429})
 
 _WHITESPACE = re.compile(r"\s+")
@@ -46,7 +48,12 @@ def blocking_status(status: int | None) -> bool:
 def build_results(
     raw: list[dict], max_results: int, resolve_href: Callable[[str], str | None]
 ) -> list[SearchResult]:
-    """Drop ads and non-http(s) links, deduplicate by URL without `#fragment`, rank from 1."""
+    """Drop ads and non-http(s) links, deduplicate by URL without `#fragment`, rank from 1.
+
+    Every text first goes through `guard.sanitize`. An entry whose title or snippet looks like
+    instructions aimed at the model is kept but withheld: empty title and snippet, URL without its
+    query string, so the model can name the page without reading what it says.
+    """
     results: list[SearchResult] = []
     seen: set[str] = set()
     for entry in raw:
@@ -54,25 +61,40 @@ def build_results(
             break
         if entry.get("is_ad"):
             continue
-        url = resolve_href(str(entry.get("href") or ""))
-        title = _normalize(str(entry.get("title") or ""))
-        if url is None or not title:
+        href = sanitize(str(entry.get("href") or ""))
+        url = resolve_href(href.text)
+        title = sanitize(str(entry.get("title") or ""))
+        snippet = sanitize(str(entry.get("snippet") or ""))
+        if url is None or not _normalize(title.text):
             continue
         key = urldefrag(url).url
         if key in seen:
             continue
         seen.add(key)
         hostname = urlparse(url).hostname or ""
+        # Signals are computed on the full text, before the snippet is cut short.
+        flags = injection_signals(f"{title.text}\n{snippet.text}")
+        if href.removed_tags or title.removed_tags or snippet.removed_tags:
+            flags.append("hidden_unicode")
+        withheld = bool(flags)
+        flags += domain_signals(url)
         results.append(
             SearchResult(
                 rank=len(results) + 1,
-                title=title,
-                url=url,
-                snippet=_normalize(str(entry.get("snippet") or ""))[:SNIPPET_MAX_CHARS],
+                title="" if withheld else _normalize(title.text),
+                url=_without_query(url) if withheld else url,
+                snippet="" if withheld else _normalize(snippet.text)[:SNIPPET_MAX_CHARS],
                 domain=hostname.removeprefix("www."),
+                flags=flags,
+                withheld=withheld,
             )
         )
     return results
+
+
+def _without_query(url: str) -> str:
+    """`url` without query string and fragment, which could carry the attack text itself."""
+    return urlunparse(urlparse(url)._replace(query="", fragment="", params=""))[:WITHHELD_URL_MAX_CHARS]
 
 
 def _normalize(text: str) -> str:

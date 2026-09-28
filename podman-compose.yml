@@ -123,8 +123,9 @@ services:
     networks:
       - core
 
-  # A browser with internet access: only on `web` (shared with `api`), never on `core`, so it
-  # can't reach `db` or `llm-proxy`.
+  # A browser reading the web: only on `web` (shared with `api`), never on `core`, so it can't
+  # reach `db` or `llm-proxy`. `web` has no route out; the browser's only way to the internet is
+  # `egress-proxy`, which passes just the hosts in deploy/egress-proxy/allowlist.txt.
   web-agent:
     build:
       context: .
@@ -135,8 +136,12 @@ services:
       # DuckDuckGo blocks a headless browser, so in compose the browser searches our own SearXNG.
       WEB_AGENT_ENGINE: ${WEB_AGENT_ENGINE:-searxng}
       WEB_AGENT_SEARXNG_URL: http://searxng:8080
+      WEB_AGENT_PROXY_URL: http://egress-proxy:3128
+      # Our own SearXNG is reached directly on `web`, not through the proxy.
+      WEB_AGENT_PROXY_BYPASS: searxng
     depends_on:
       - searxng
+      - egress-proxy
     read_only: true
     tmpfs:
       - /tmp
@@ -155,13 +160,34 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
-    ports:
-      - "8091:8080"
+    # No host port: `web` is internal, so a published port wouldn't be forwarded anyway. From the
+    # host, run web-agent itself (`uv run uvicorn web_agent.main:app --port 8091`) or use its CLI.
     networks:
       - web
 
+  # The allowlisting forward proxy in front of web-agent's browser (tinyproxy, host filter,
+  # default deny). On `web` to be reachable, on `egress` to get out.
+  egress-proxy:
+    build:
+      context: .
+      dockerfile: deploy/Containerfile.egress-proxy
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/tinyproxy
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    networks:
+      - web
+      - egress
+
   # Private metasearch engine: it queries the public engines (Brave, Google, Wikipedia, ...) and
-  # web-agent's browser reads its results page. Only on `web`.
+  # web-agent's browser reads its results page. On `web` for web-agent, on `egress` to get out.
   searxng:
     image: docker.io/searxng/searxng:latest
     environment:
@@ -182,11 +208,15 @@ services:
       - "8092:8080"
     networks:
       - web
+      - egress
 
 networks:
   core:
   edge:
+  # No route out of the host: what's on it reaches the internet only via a service also on `egress`.
   web:
+    internal: true
+  egress:
 
 volumes:
   db-data:

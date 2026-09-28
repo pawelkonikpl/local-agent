@@ -12,13 +12,31 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
-from playwright.async_api import Browser, BrowserContext, CDPSession, Playwright, async_playwright
+from playwright.async_api import Browser, BrowserContext, CDPSession, Playwright, ProxySettings, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
 logger = logging.getLogger(__name__)
 
 CONSOLE_ERRORS_KEPT = 20
+BLOCKED_REQUESTS_KEPT = 20
+LOGGED_URL_MAX_CHARS = 200
+# Not needed to read a page's text, and a tracking/exfiltration channel: refused on every origin.
+BLOCKED_RESOURCE_TYPES = frozenset({"Image", "Media", "Font"})
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def origin_of(url: str) -> str:
+    """`scheme://host:port` of `url`, with the default port made explicit ("" if not http(s))."""
+    parsed = urlsplit(url)
+    if parsed.scheme not in _DEFAULT_PORTS or not parsed.hostname:
+        return ""
+    try:
+        port = parsed.port or _DEFAULT_PORTS[parsed.scheme]
+    except ValueError:
+        return ""
+    return f"{parsed.scheme}://{parsed.hostname}:{port}"
 
 
 class BrowserError(Exception):
@@ -33,25 +51,50 @@ class NavigationOutcome:
     status: int | None
 
 
-class BrowserSession:
-    """One page in its own clean `BrowserContext`, with the CDP domains the Solver senses through."""
+@dataclass(frozen=True)
+class BlockedRequest:
+    url: str
+    resource_type: str
+    frame_id: str
 
-    def __init__(self, cdp: CDPSession, *, navigation_timeout_s: float) -> None:
+
+class BrowserSession:
+    """One page in its own clean `BrowserContext`, with the CDP domains the Solver senses through.
+
+    Every request the page makes -- navigations, redirects, iframes, scripts -- is paused by the
+    `Fetch` domain and let through only if its origin is in `allowed_origins` (Agent Origin Sets:
+    a read-only set fixed by code for the task, which neither the page nor the model can extend).
+    """
+
+    def __init__(
+        self, cdp: CDPSession, *, navigation_timeout_s: float, allowed_origins: frozenset[str]
+    ) -> None:
         self._cdp = cdp
         self._navigation_timeout_s = navigation_timeout_s
+        self._allowed_origins = allowed_origins
         self._document_status: dict[str, int] = {}
         self._loaded = asyncio.Event()
+        # Handlers of paused requests, kept referenced until done so they aren't garbage-collected.
+        self._fetch_tasks: set[asyncio.Task] = set()
+        self._blocked: list[BlockedRequest] = []
+        # URLs (shortened) the origin policy refused, oldest first; the same list for the session's
+        # lifetime, so a caller holding it sees later refusals too.
+        self.blocked_requests: list[str] = []
         self.console_errors: list[str] = []
 
     @classmethod
-    async def open(cls, context: BrowserContext, *, navigation_timeout_s: float) -> "BrowserSession":
+    async def open(
+        cls, context: BrowserContext, *, navigation_timeout_s: float, allowed_origins: frozenset[str]
+    ) -> "BrowserSession":
         page = await context.new_page()
         cdp = await context.new_cdp_session(page)
-        session = cls(cdp, navigation_timeout_s=navigation_timeout_s)
+        session = cls(cdp, navigation_timeout_s=navigation_timeout_s, allowed_origins=allowed_origins)
+        cdp.on("Fetch.requestPaused", session._on_request_paused)
         cdp.on("Network.responseReceived", session._on_response)
         cdp.on("Page.loadEventFired", lambda _params: session._loaded.set())
         cdp.on("Runtime.consoleAPICalled", session._on_console)
         cdp.on("Runtime.exceptionThrown", session._on_exception)
+        await session._send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
         for domain in ("Network", "Page", "Runtime"):
             await session._send(f"{domain}.enable")
         return session
@@ -61,15 +104,24 @@ class BrowserSession:
         one that acted: the document status comes from `Network.responseReceived`, not from
         `Page.navigate`'s own answer."""
         self._loaded.clear()
+        blocked_before = len(self._blocked)
         try:
             async with asyncio.timeout(self._navigation_timeout_s):
                 result = await self._send("Page.navigate", {"url": url})
+                self._raise_if_navigation_blocked(result.get("frameId", ""), blocked_before)
                 if result.get("errorText"):
                     raise BrowserError(f"Navigation failed: {result['errorText']}")
                 await self._loaded.wait()
         except TimeoutError:
             raise BrowserError(f"Navigation timed out after {self._navigation_timeout_s:g}s") from None
+        # A redirect to a refused origin can surface only after the navigation itself started.
+        self._raise_if_navigation_blocked(result.get("frameId", ""), blocked_before)
         return NavigationOutcome(url=url, status=self._document_status.get(result.get("loaderId", "")))
+
+    def _raise_if_navigation_blocked(self, frame_id: str, since: int) -> None:
+        for blocked in self._blocked[since:]:
+            if blocked.resource_type == "Document" and blocked.frame_id == frame_id:
+                raise BrowserError(f"navigation blocked by origin policy: {origin_of(blocked.url) or blocked.url}")
 
     async def evaluate(self, expression: str) -> Any:
         """Sense (rung 1 of the ladder): run JS in the page and return its JSON-serializable value."""
@@ -94,6 +146,29 @@ class BrowserSession:
             return await self._cdp.send(method, params or {})
         except PlaywrightError as exc:
             raise BrowserError(f"{method} failed: {exc.message}") from exc
+
+    def _on_request_paused(self, params: dict) -> None:
+        task = asyncio.create_task(self._decide(params))
+        self._fetch_tasks.add(task)
+        task.add_done_callback(self._fetch_tasks.discard)
+
+    async def _decide(self, params: dict) -> None:
+        request_id = params["requestId"]
+        url = params.get("request", {}).get("url", "")
+        resource_type = params.get("resourceType", "")
+        try:
+            if origin_of(url) in self._allowed_origins and resource_type not in BLOCKED_RESOURCE_TYPES:
+                await self._cdp.send("Fetch.continueRequest", {"requestId": request_id})
+                return
+            if len(self._blocked) < BLOCKED_REQUESTS_KEPT:
+                self._blocked.append(
+                    BlockedRequest(url[:LOGGED_URL_MAX_CHARS], resource_type, params.get("frameId", ""))
+                )
+                self.blocked_requests.append(url[:LOGGED_URL_MAX_CHARS])
+            await self._cdp.send("Fetch.failRequest", {"requestId": request_id, "errorReason": "BlockedByClient"})
+        except PlaywrightError:
+            # The page or the context went away while the request was paused; nothing to answer.
+            pass
 
     def _on_response(self, params: dict) -> None:
         if params.get("type") == "Document":
@@ -123,9 +198,19 @@ class BrowserManager:
     searches or users.
     """
 
-    def __init__(self, *, cdp_url: str | None, headless: bool, navigation_timeout_s: float) -> None:
+    def __init__(
+        self,
+        *,
+        cdp_url: str | None,
+        headless: bool,
+        navigation_timeout_s: float,
+        proxy_url: str | None = None,
+        proxy_bypass: str | None = None,
+    ) -> None:
         self._cdp_url = cdp_url
         self._headless = headless
+        self._proxy_url = proxy_url
+        self._proxy_bypass = proxy_bypass
         self._navigation_timeout_s = navigation_timeout_s
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
@@ -145,7 +230,7 @@ class BrowserManager:
                 self._playwright = None
 
     @asynccontextmanager
-    async def session(self) -> AsyncGenerator[BrowserSession]:
+    async def session(self, *, allowed_origins: frozenset[str]) -> AsyncGenerator[BrowserSession]:
         browser = await self._ensure_browser()
         try:
             context = await browser.new_context()
@@ -153,13 +238,24 @@ class BrowserManager:
             raise BrowserError(f"Could not open a browser context: {exc.message}") from exc
         self.open_contexts += 1
         try:
-            yield await BrowserSession.open(context, navigation_timeout_s=self._navigation_timeout_s)
+            yield await BrowserSession.open(
+                context, navigation_timeout_s=self._navigation_timeout_s, allowed_origins=allowed_origins
+            )
         finally:
             self.open_contexts -= 1
             try:
                 await context.close()
             except PlaywrightError:
                 logger.warning("Closing a browser context failed", exc_info=True)
+
+    def _proxy(self) -> ProxySettings | None:
+        """The egress proxy every request goes through, except hosts in `proxy_bypass`."""
+        if not self._proxy_url:
+            return None
+        proxy: ProxySettings = {"server": self._proxy_url}
+        if self._proxy_bypass:
+            proxy["bypass"] = self._proxy_bypass
+        return proxy
 
     async def _ensure_browser(self) -> Browser:
         async with self._lock:
@@ -172,7 +268,7 @@ class BrowserManager:
                     self._browser = await self._playwright.chromium.connect_over_cdp(self._cdp_url)
                 else:
                     self._browser = await self._playwright.chromium.launch(
-                        headless=self._headless, args=["--disable-dev-shm-usage"]
+                        headless=self._headless, args=["--disable-dev-shm-usage"], proxy=self._proxy()
                     )
             except PlaywrightError as exc:
                 raise BrowserError(f"Could not start the browser: {exc.message}") from exc
