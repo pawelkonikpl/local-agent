@@ -55,12 +55,17 @@ Warstwa ma cztery piętra. Każde działa niezależnie od tego, do czego da się
    - Na `Fetch.requestPaused` przepuszcza żądanie (`Fetch.continueRequest`), jeśli origin (`scheme://host:port`) należy do `allowed_origins` **i** `resourceType` nie jest w `{"Image", "Media", "Font"}` (do odczytu wyników nie są potrzebne, a są kanałem śledzenia). W każdym innym przypadku wywołuje `Fetch.failRequest(errorReason="BlockedByClient")` i dopisuje URL (ucięty do 200 znaków) do `session.blocked_requests` (maks. 20 wpisów).
    - Handler CDP jest synchroniczny, więc odpowiedź idzie przez `asyncio.create_task`, a taski trzeba trzymać w zbiorze, żeby GC ich nie zebrał.
    - Wstrzymana nawigacja główna (np. przekierowanie wyszukiwarki na obcą domenę) kończy się błędem `BrowserError("navigation blocked by origin policy: <origin>")`, a wynik ma `status="error"`.
-7. **`search.py`**: `allowed_origins = {origin(engine.url_for(...))}`. Tylko wyszukiwarka należy do zbioru „do odczytu”, a zbiór „do zapisu” jest pusty. Treść dozwolonego źródła nigdy nie rozszerza zbioru, bo decyduje o nim kod, a nie strona ani model.
-8. **Sieć w `podman-compose.yml`**:
-   - Sieć `web` dostaje `internal: true` (bez wyjścia do internetu).
-   - Nowa sieć `egress` jest tylko dla `searxng`, a `searxng` należy do `web` i `egress`.
-   - `web-agent` zostaje wyłącznie w `web`, więc widzi tylko `searxng` (i `api`).
-   - Komentarz w compose i w `.env.example`: przy tym układzie silnik `duckduckgo` w compose nie działa. Jest przeznaczony do CLI na hoście, a w compose jest już domyślnie wyłączony, bo blokuje headless.
+7. **`search.py`**: `allowed_origins = {origin(engine.url_for(...))} | engine.extra_origins`.
+   - `SearchEngine` (`engines/base.py`) dostaje atrybut `extra_origins: frozenset[str]`: dodatkowe originy, bez których strona się nie wyrenderuje (np. CDN skryptów serwisu). Dla `searxng` i `duckduckgo` jest pusty.
+   - Zbiór „do odczytu” = origin silnika + `extra_origins`, zbiór „do zapisu” jest pusty.
+   - Treść dozwolonego źródła nigdy nie rozszerza zbioru, bo decyduje o nim kod (stała w klasie silnika), a nie strona ani model.
+8. **Sieć: ruch wychodzący tylko przez proxy z listą dozwolonych domen.** Całkowite odcięcie od internetu wykluczałoby bezpośrednie wchodzenie na strony serwisów (`narzedzie-site-search.md`), dlatego:
+   - Sieć `web` dostaje `internal: true` (bez bezpośredniego wyjścia do internetu).
+   - Nowa sieć `egress` jest tylko dla `searxng` i nowego serwisu `egress-proxy`. Oba należą do `web` i `egress`.
+   - `egress-proxy` (`deploy/Containerfile.egress-proxy` na bazie Squida, konfiguracja `deploy/egress-proxy/squid.conf`, hardening jak `searxng`): przepuszcza `CONNECT :443` i `GET` wyłącznie do domen z `deploy/egress-proxy/allowlist.txt` (jedna domena w linii, `.domena` = z subdomenami). Wszystko inne dostaje 403. Na start lista jest pusta, a domeny dopisują plany narzędzi, które ich potrzebują.
+   - `web-agent` zostaje wyłącznie w `web`. Chromium startuje z `--proxy-server=http://egress-proxy:3128 --proxy-bypass-list=searxng` (ustawienie `WEB_AGENT_PROXY_URL`, puste = bez proxy, np. w CLI na hoście).
+   - Lista domen jest w konfiguracji wdrożenia, więc zmienia ją człowiek w repo. Ani strona, ani model nie mają do niej dostępu. To druga, sieciowa kopia zbioru z pkt 7: jeśli błąd w kodzie CDP przepuści żądanie, proxy i tak je odrzuci.
+   - Komentarz w compose i w `.env.example`: przy tym układzie silnik `duckduckgo` w compose nie działa, chyba że dopisze się go do listy. Jest przeznaczony do CLI na hoście, a w compose jest już domyślnie wyłączony, bo blokuje headless.
 
 ### C. api: oznaczanie danych, strażnik polityki, kanarek
 
@@ -128,7 +133,7 @@ Warstwa ma cztery piętra. Każde działa niezależnie od tego, do czego da się
 | Czerwone flagi, przerwanie korzystania ze źródła, zgłoszenie URL (§4, §7) | pkt 2, 4, 9 |
 | Typosquatting, kategorie wrażliwe (§3) | pkt 3, 9 |
 | Agent Origin Sets, filtr iframe'ów (§2.4) | pkt 6, 7 |
-| Allowlist ruchu wychodzącego na poziomie sieci (§6.7) | pkt 8 |
+| Allowlist ruchu wychodzącego na poziomie sieci (§6.7) | pkt 8 (proxy z listą domen) |
 | Deterministyczny monitor, strażnik bez treści strony (§2.3, §2.5) | pkt 10, 11 |
 | Reguła dwóch (§2.1) | pkt 10, 11 |
 | Kanarki (§6.6), skan wyjścia (§6.5) | pkt 11, 13 |
@@ -189,7 +194,8 @@ Warstwa ma cztery piętra. Każde działa niezależnie od tego, do czego da się
 - `npm run lint` i `npm run build` przechodzą.
 
 **Ręcznie (podman-compose)**
-- `podman exec <web-agent> python -c "import urllib.request as u; u.urlopen('https://example.com', timeout=3)"` → błąd (brak internetu). Wyszukiwanie przez `curl … /v1/search` nadal daje `status: "ok"`.
+- `podman exec <web-agent> python -c "import urllib.request as u; u.urlopen('https://example.com', timeout=3)"` → błąd (brak bezpośredniego internetu). To samo przez proxy (`urllib.request.ProxyHandler({'https': 'http://egress-proxy:3128'})`) → błąd 403, bo `example.com` nie ma na liście. Wyszukiwanie przez `curl … /v1/search` nadal daje `status: "ok"`.
+- Po dopisaniu `example.com` do `allowlist.txt` i restarcie `egress-proxy` to samo żądanie przez proxy przechodzi.
 - W czacie pytanie wymagające wyszukiwania działa jak dotąd. Logi `web-agent` mają linię `search_audit`.
 - Istniejące testy (`uv run pytest`) przechodzą. Jedyne dopuszczalne zmiany w istniejących testach to nowe pola w modelach (`flags`, `withheld`) i sygnatura `execute(..., guard=None)`.
 
