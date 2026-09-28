@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     local_model_base_url: str | None = None
-    local_model_id: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    local_model_id: str = "unsloth/Qwen3.5-4B-GGUF:Q4_K_M"
     environment: str = "development"
 
 

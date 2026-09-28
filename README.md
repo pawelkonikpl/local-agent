@@ -72,11 +72,10 @@ API: http://localhost:8000, GUI: http://localhost:8080 (nginx serwuje statyczny 
 services/api/         FastAPI: auth, RBAC, admin, chat (sesje/wiadomości/SSE), DB models, migracje Alembic
 services/llm-proxy/   FastAPI: metered streaming forwarder, provider-agnostic (Anthropic/OpenAI/local-model),
                       własny dostęp do Postgresa
-services/local-model/ FastAPI + transformers: mały CPU-only model (Qwen2.5-0.5B) do dev/testów, jeden z
-                      providerów llm-proxy (poza uv workspace — zależności instalowane bezpośrednio w
-                      Containerfile, nie przez uv, żeby torch nie wchodził do głównego workspace)
 libs/shared/          Wspólne definicje tabel SQLAlchemy (sessions, messages, token_usage, user_usage_*)
 gui/                  React + Vite: login -> dashboard -> czat
-deploy/               Containerfile.{api,llm-proxy,gui,local-model}, konfiguracja nginx
+deploy/               Containerfile.{api,llm-proxy,gui,local-model}, konfiguracja nginx; local-model to
+                      llama-server z llama.cpp (bez własnego kodu): mały CPU-only model GGUF
+                      (Qwen3.5-4B Q4_K_M) do dev/testów, jeden z providerów llm-proxy
 scripts/             seed_admin.py
 ```

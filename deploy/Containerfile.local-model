@@ -1,16 +1,19 @@
-FROM python:3.12-slim
+# llama.cpp's own OpenAI-compatible server (CPU build): quantized GGUF weights + AVX2 kernels, so
+# a 2B model runs faster in less RAM than the previous 0.5B did in float32 through transformers.
+# Pinned to a build number -- chat-template / tool-call parsing changes between llama.cpp builds.
+FROM ghcr.io/ggml-org/llama.cpp:server-b11176
 
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
- && pip install --no-cache-dir "transformers>=4.50" accelerate "fastapi>=0.141" "uvicorn[standard]>=0.32" "pydantic-settings>=2.6"
-
-RUN useradd -u 10001 -m -d /home/appuser appuser
+# The base image runs as root; compose runs this as 10001 with a read-only rootfs, so the only
+# writable place is the weights cache volume mounted below. Creating the mount point here, owned
+# by 10001, makes podman initialise the named volume with that ownership.
+RUN useradd -u 10001 -m -d /home/appuser appuser \
+ && mkdir -p /home/appuser/.cache/huggingface \
+ && chown -R 10001:10001 /home/appuser/.cache
 USER 10001:10001
-WORKDIR /home/appuser
 
-COPY --chown=10001:10001 services/local-model/src/local_model ./local_model
-
-ENV HF_HOME=/home/appuser/.cache/huggingface
-ENV PYTHONPATH=/home/appuser
+ENV HOME=/home/appuser \
+    HF_HOME=/home/appuser/.cache/huggingface \
+    LLAMA_CACHE=/home/appuser/.cache/huggingface/llama.cpp \
+    LLAMA_ARG_PORT=8080 \
+    LLAMA_ARG_UI=false
 EXPOSE 8080
-
-CMD ["python", "-m", "uvicorn", "local_model.main:app", "--host", "0.0.0.0", "--port", "8080"]

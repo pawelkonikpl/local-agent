@@ -82,7 +82,7 @@ Read these before writing anything:
 **`description`**
 - In English, 1–3 sentences: what the tool returns, and when the model should call it.
 - This text is the only thing the model knows about the tool. The small `local-model`
-  (Qwen2.5 0.5B) decides whether to call a tool almost entirely from it. Make the trigger
+  (Qwen3.5 4B) decides whether to call a tool almost entirely from it. Make the trigger
   explicit ("Use it whenever the answer depends on …").
 
 **`input_schema`**
