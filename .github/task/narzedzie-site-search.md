@@ -103,7 +103,7 @@ E. **Fixture'y z prawdziwej strony.** Z chmury nie da się pobrać listingu, wi�
    - `description` (po angielsku): szuka bezpośrednio w wyszukiwarce wskazanego serwisu i zwraca oferty (tytuł, cena, URL); używać zamiast `web_search` z `site:`, gdy serwis jest na liście; ceny są odczytane ze strony i mogą się zmienić.
    - `input_schema`: `site` jako `enum` z `settings.web_agent_sites` (domyślnie `["allegro.pl"]`), `query` (wymagane), `max_results` 1–10.
    - Walidacja jak w `WebSearchTool._validate` (wydzielić wspólne sprawdzanie `query` i `max_results` do małej funkcji w `api/tools/web_common.py`, żeby nie kopiować) + `site` spoza listy → `ToolInputError`.
-   - Wynik formatowany tym samym spotlightingiem co `web_search` (wspólna funkcja z planu bezpieczeństwa, pkt 9), z ceną w linii tytułu (`1. <title> — <price>`) i dopiskiem `[sponsored]`. `source="site_search:<site>"`.
+   - Wynik `ok` w tym samym formacie co `web_search` (`ustrukturyzowany-wynik-web-search.md`): JSON `for_model` w spotlightingu i `display` (`WebResultsDisplay`) dla kart w GUI, `source="site_search:<site>"`. `WebResultView` dostaje pola `price: str | None = None` i `sponsored: bool = False` (z flagi `sponsored`), a karta w GUI pokazuje cenę i etykietę „sponsored”.
    - Łączy się z `settings.web_agent_sites_url` (instancja na hoście, nie kontenerowy `web_agent_url`). Rejestrowany w `build_default_registry`, gdy `web_agent_sites_url` jest ustawione i lista `web_agent_sites` nie jest pusta.
    - Brak połączenia (instancja na hoście nie działa) → `ToolResult` z błędem: „The site browser isn't running on the user's computer; ask the user to start it (scripts/site-browser.sh and scripts/site-agent.sh).”
    - `status="blocked"` → komunikat dla modelu: poproś użytkownika o rozwiązanie weryfikacji w oknie przeglądarki na jego komputerze i o ponowienie prośby; nie ponawiaj sam.
@@ -150,7 +150,7 @@ E. **Fixture'y z prawdziwej strony.** Z chmury nie da się pobrać listingu, wi�
 **HTTP i api**
 - `POST /v1/site-search` bez tokenu → 401; `{"site": "amazon.pl", "query": "x"}` → 422; poprawne body ze zmockowanym serwisem → 200 i body zgodne z `SearchResponse`.
 - `SiteSearchTool.input_schema` ma `site.enum == ["allegro.pl"]`; input `{"site": "allegro.pl"}` bez `query` → `ToolInputError`; `{"site": "evil.example", "query": "x"}` → `ToolInputError`, bez żądania HTTP.
-- Wynik `ok` w `_format`: znaczniki `untrusted_web_content` z `source="site_search:allegro.pl"`, cena w linii tytułu, `[sponsored]` przy ofertach sponsorowanych.
+- Wynik `ok` w `_format`: znaczniki `untrusted_web_content` z `source="site_search:allegro.pl"`, w JSON-ie wyniku pole `price`, a przy ofertach sponsorowanych `"sponsored": true`; `display.source == "site_search:allegro.pl"`.
 - `GenerationGuard`: po `site_search` generacja jest oznaczona jako tainted (tak jak po `web_search`).
 
 **Tryby instancji**
@@ -169,7 +169,7 @@ E. **Fixture'y z prawdziwej strony.** Z chmury nie da się pobrać listingu, wi�
 ## Notatki implementacyjne
 
 - `sites/` nie importuje Playwrighta, tak jak `engines/`.
-- Modele Pydantic zamiast `dict` (reguła z `CLAUDE.md`): surowy wynik `extract_js` parsować na granicy do modelu (np. `RawOffer` z `title`, `href`, `price`, `snippet`, `is_ad`) i dalej przekazywać model. W `api` odpowiedź web-agent walidować do modelu `SearchResponse` po stronie `api` zamiast czytać `body.get(...)`. Przy okazji przepisać tak samo istniejące `build_results(raw: list[dict])` i `web_common.format_result(result: dict)`.
+- Modele Pydantic zamiast `dict` (reguła z `CLAUDE.md`): surowy wynik `extract_js` parsować na granicy do modelu (np. `RawOffer` z `title`, `href`, `price`, `snippet`, `is_ad`) i dalej przekazywać model. W `api` odpowiedź web-agenta jest już walidowana do modelu (`WebAgentResponse`, zadanie `ustrukturyzowany-wynik-web-search.md`); tu dopisać do niego `price`. Przy okazji przepisać tak samo istniejące `build_results(raw: list[dict])`.
 - Zasada dla każdego kolejnego serwisu w `sites/`: model dostaje tylko pola wskazane selektorami (tytuł, cena, URL, parametry). Treści pisane przez innych ludzi (opinie, komentarze, Q&A, opisy) są wyłączone domyślnie. Jeśli kiedyś będą potrzebne (np. „podsumuj opinie”), to osobne narzędzie z własnym planem, a nie rozszerzenie `site_search`.
 - Selektory Allegro to najbardziej kruchy element. Stąd rozróżnienie `no_results` vs `error: unexpected page layout` (już jest w `SearchService`), które powie, kiedy selektory się zestarzały.
 - `min_interval_s` z `RateLimiter` działa per `engine.name`, więc Allegro ma własny odstęp niezależny od SearXNG. Nie zwiększać go „dla ludzkości”; to uprzejmość wobec serwisu, nie maskowanie.
