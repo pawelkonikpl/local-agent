@@ -39,6 +39,46 @@ function CodeBlock({ node, children, ...props }: ComponentPropsWithoutRef<'pre'>
   )
 }
 
+function hostnameOf(url: string | undefined): string {
+  if (!url) return ''
+  try {
+    return new URL(url, window.location.href).hostname
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * External images are never fetched: loading one sends a request the page chose, and its URL can
+ * carry data out of the conversation (the EchoLeak pattern). Shown as text instead.
+ */
+function BlockedImage({ src, alt }: ComponentPropsWithoutRef<'img'> & ExtraProps) {
+  const host = hostnameOf(typeof src === 'string' ? src : undefined)
+  return (
+    <span className="md-image-blocked" title={typeof src === 'string' ? src : undefined}>
+      [image: {alt || 'no description'}
+      {host ? ` — ${host}` : ''}]
+    </span>
+  )
+}
+
+/**
+ * Links open in a new tab without a referrer, and name the host they lead to whenever the link
+ * text doesn't, so a link can't pass itself off as pointing somewhere else.
+ */
+function SafeLink({ node: _node, href, children, ...props }: ComponentPropsWithoutRef<'a'> & ExtraProps) {
+  const host = hostnameOf(href)
+  const text = typeof children === 'string' ? children : ''
+  return (
+    <>
+      <a {...props} href={href} title={href} target="_blank" rel="noopener noreferrer nofollow">
+        {children}
+      </a>
+      {host && text !== host && !text.includes(host) ? <span className="md-link-host"> ({host})</span> : null}
+    </>
+  )
+}
+
 interface MarkdownProps {
   text: string
 }
@@ -49,7 +89,7 @@ export default function Markdown({ text }: MarkdownProps) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
         rehypePlugins={[rehypeHighlight]}
-        components={{ pre: CodeBlock }}
+        components={{ pre: CodeBlock, img: BlockedImage, a: SafeLink }}
       >
         {text}
       </ReactMarkdown>

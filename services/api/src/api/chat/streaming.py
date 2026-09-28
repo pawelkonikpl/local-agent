@@ -25,10 +25,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.chat.anthropic_stream import MALFORMED_INPUT_MESSAGE, TextDelta, ToolUseComplete, TurnAccumulator
+from api.chat.prompts import web_rules
 from api.config import settings
 from api.db.models.tool_call_event import ToolCallEvent
 from api.db.session import AsyncSessionLocal
 from api.tools.base import ToolResult
+from api.tools.guard import GenerationGuard
 from api.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -223,6 +225,9 @@ async def run_generation(
         "X-Local-Agent-Session-Id": str(session_id),
     }
     tool_definitions = tools.definitions() if settings.chat_tools_enabled else []
+    guard = GenerationGuard()
+    # Only in the payload, never persisted: the canary in it must not outlive this generation.
+    system_prompt = web_rules(guard.canary) if tool_definitions and tools.reads_untrusted() else None
     history = list(anthropic_messages)
     sequence_numbers = itertools.count(first_sequence_number)
 
@@ -237,6 +242,8 @@ async def run_generation(
             payload["output_config"] = {"effort": reasoning_effort}
         if tool_definitions:
             payload["tools"] = tool_definitions
+        if system_prompt is not None:
+            payload["system"] = system_prompt
 
         turn = TurnAccumulator()
         try:
@@ -244,6 +251,7 @@ async def run_generation(
         except asyncio.CancelledError:
             error_message = CANCELLED_MESSAGE
 
+        guard.check_output("".join(block.get("text", "") for block in turn.text_blocks))
         tool_uses = turn.tool_uses
         if error_message is not None or turn.stop_reason != "tool_use" or not tool_uses:
             # Nothing will answer this turn's tool calls, so only its text is kept.
@@ -255,7 +263,7 @@ async def run_generation(
             session_id, next(sequence_numbers), "assistant", turn.content_blocks
         )
         results, was_cancelled = await _run_tools(
-            manager, session_id, tools, tool_uses, message_id=assistant_message.id
+            manager, session_id, tools, tool_uses, message_id=assistant_message.id, guard=guard
         )
         await _save_message(session_id, next(sequence_numbers), "user", results)
         if was_cancelled:
@@ -322,6 +330,7 @@ async def _run_tools(
     tool_uses: list[ToolUseComplete],
     *,
     message_id: uuid.UUID,
+    guard: GenerationGuard,
 ) -> tuple[list[dict], bool]:
     """Execute a turn's tool calls in order, recording each in `tool_call_events`.
 
@@ -351,7 +360,7 @@ async def _run_tools(
             if tool_use.input_error:
                 result = ToolResult(MALFORMED_INPUT_MESSAGE, is_error=True)
             else:
-                result = await tools.execute(tool_use.name, tool_use.input)
+                result = await tools.execute(tool_use.name, tool_use.input, guard=guard)
             await finish(tool_use, result)
     except asyncio.CancelledError:
         # Not re-awaiting the cancelled tool: the pending calls are answered from here instead.

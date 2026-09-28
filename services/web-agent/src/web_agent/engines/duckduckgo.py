@@ -42,6 +42,7 @@ def _resolve_href(href: str) -> str | None:
 
 class DuckDuckGoEngine:
     name = "duckduckgo"
+    extra_origins: frozenset[str] = frozenset()
     extract_js = extract_js(
         result=RESULT_SELECTOR, title=TITLE_SELECTOR, snippet=SNIPPET_SELECTOR, ad_class=AD_CLASS
     )

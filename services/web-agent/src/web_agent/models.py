@@ -18,6 +18,10 @@ class SearchResult(BaseModel):
     url: str
     snippet: str
     domain: str
+    # Why this result deserves caution (`instruction_override`, `lookalike_domain:paypal.com`, ...).
+    flags: list[str] = []
+    # Title and snippet dropped as suspected prompt injection; only the URL is kept, to report it.
+    withheld: bool = False
 
 
 SearchStatus = Literal["ok", "no_results", "blocked", "error"]

@@ -1,0 +1,3 @@
+# Hosts web-agent's browser may reach, one fnmatch pattern per line (see tinyproxy.conf).
+# Edited by people in this repo -- never by a page or the model. Each tool that needs the internet
+# adds its own hosts here under a comment naming the tool.

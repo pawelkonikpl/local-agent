@@ -8,6 +8,7 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic-settings>=2.6",
     "playwright>=1.50",
+    "tldextract>=5.1",
 ]
 
 [project.scripts]

@@ -29,6 +29,7 @@ class SearxngEngine:
     so the browser here only ever talks to our own server."""
 
     name = "searxng"
+    extra_origins: frozenset[str] = frozenset()
     extract_js = extract_js(result=RESULT_SELECTOR, title=TITLE_SELECTOR, snippet=SNIPPET_SELECTOR)
 
     def __init__(self, base_url: str) -> None:

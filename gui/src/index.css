@@ -513,6 +513,19 @@ body {
   color: var(--la-accent);
 }
 
+.markdown-body .md-link-host {
+  color: var(--la-text-faint);
+  font-size: 0.85em;
+}
+
+.markdown-body .md-image-blocked {
+  color: var(--la-text-dim);
+  background: var(--la-surface-2);
+  border-radius: 4px;
+  padding: 0 0.3em;
+  font-size: 0.9em;
+}
+
 .markdown-body blockquote {
   border-left: 3px solid var(--la-border-strong);
   padding-left: 0.8em;

@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     # searxng_url).
     engine: str = "duckduckgo"
     searxng_url: str | None = None
+    # Egress proxy (compose: the allowlisting `egress-proxy`) every browser request goes through,
+    # except hosts in `proxy_bypass` (Chromium's bypass-list syntax). None = direct, e.g. the CLI.
+    proxy_url: str | None = None
+    proxy_bypass: str | None = None
     headless: bool = True
     navigation_timeout_s: float = 15
     search_timeout_s: float = 25

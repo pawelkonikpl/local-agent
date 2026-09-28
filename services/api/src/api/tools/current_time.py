@@ -2,7 +2,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from api.tools.base import ToolInputError, ToolResult
+from api.tools.base import Capability, ToolInputError, ToolResult
 
 DEFAULT_TIMEZONE = "UTC"
 
@@ -33,6 +33,7 @@ class CurrentTimeTool:
         },
         "additionalProperties": False,
     }
+    capabilities: frozenset[Capability] = frozenset()
 
     def __init__(self, now: Callable[[], datetime] = _utc_now) -> None:
         self._now = now

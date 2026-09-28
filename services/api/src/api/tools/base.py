@@ -1,5 +1,10 @@
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
+
+# What a tool can do, for the Rule of Two: an agent session should combine at most two of reading
+# untrusted content, touching sensitive data, and having an effect outside (sending, changing).
+# `GenerationGuard` enforces the combinations; the model never sees these.
+Capability = Literal["reads_untrusted", "sensitive_data", "external_effect"]
 
 
 @dataclass(frozen=True)
@@ -29,5 +34,6 @@ class Tool(Protocol):
     name: str
     description: str
     input_schema: dict
+    capabilities: frozenset[Capability]
 
     async def run(self, input: dict) -> ToolResult: ...
