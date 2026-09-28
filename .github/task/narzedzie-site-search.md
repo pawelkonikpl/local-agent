@@ -78,6 +78,9 @@ E. **Fixture'y z prawdziwej strony.** Z chmury nie da się pobrać listingu, wi�
      - `url_for` → `https://allegro.pl/listing?string=<urlencoded query>`;
      - `extra_origins` = originy potrzebne do wyrenderowania listingu (skrypty i style serwisu). Ustalić z prawdziwej strony w DevTools (zakładka Network, typy `Script`, `Stylesheet`, `XHR/Fetch`) i wpisać jako stałą. Obrazki i fonty i tak blokujemy;
      - `extract_js`: wszystkie selektory jako stałe na górze pliku, jak w `duckduckgo.py`. Kotwice semantyczne zamiast wygenerowanych nazw klas: link oferty = `a[href*="/oferta/"]`, kontener = najbliższy `article` nad linkiem, cena = element z `aria-label` lub tekstem ceny w kontenerze, sponsorowane = kontener zawierający etykietę „Sponsorowane” / „Oferta sponsorowana”. **Najpierw sprawdzić**, czy strona ma dane listingu w osadzonym JSON (`<script type="application/json">`). Jeśli tak i jest stabilniejszy od DOM, czytać z niego. Decyzję i powód zapisać w docstringu;
+     - **Czytamy tylko wybrane pola, nigdy „całą treść”.** `extract_js` zwraca wyłącznie: tytuł oferty (tekst linku `/oferta/`), cenę, URL, znacznik „sponsorowane” oraz opcjonalnie krótkie parametry strukturalne z kafelka (np. „stan: nowy”, „dostawa od …”) jako `snippet`, maks. 150 znaków. **Nie czytamy** sekcji z tekstem pisanym przez innych użytkowników ani sprzedawców: opinii i ocen, komentarzy, pytań i odpowiedzi, opisów ofert, „historii sprzedawcy”, bannerów i bloków reklamowych. To lista dozwolonych pól (allowlist), a nie lista zakazanych sekcji: wszystko, czego selektor pola jawnie nie wskazuje, nie trafia do modelu, także gdy serwis doda nową sekcję;
+     - dodatkowo, jako druga warstwa, `extract_js` przed odczytem pól pomija elementy leżące w kontenerach komentarzy/opinii (stała `EXCLUDED_CONTAINERS` na górze pliku, np. selektory sekcji `opinie`, `komentarze`, `pytania`, `[itemprop="review"]`, `[data-role*="review"]`; ustalić z fixture'a). Kafelek oferty, którego pole leży w takim kontenerze, jest pomijany;
+     - tytuły ofert też pisze sprzedawca, więc nadal przechodzą przez `sanitize` i sygnały injection z planu bezpieczeństwa (wstrzymanie wyniku z flagą);
      - `parse`: `build_results(raw, max_results, allegro_url, ads="flag")`, gdzie `allegro_url` przyjmuje tylko `https://allegro.pl/...` (link wskazujący poza serwis jest odrzucany), obcina query string poza identyfikatorem oferty i zostawia ścieżkę `/oferta/...`;
      - `detect_block`: status 403/429/5xx albo strona ochrony anty-botowej (znaczniki tekstu i/lub obecność elementu wyzwania; ustalić na zapisanej stronie blokady) → powód, np. `"allegro.pl bot protection (captcha)"`;
      - `is_no_results`: znacznik tekstowy strony „brak wyników” z fixture'a.
@@ -139,6 +142,9 @@ E. **Fixture'y z prawdziwej strony.** Z chmury nie da się pobrać listingu, wi�
 
 **Z przeglądarką (marker `browser`, strony serwowane lokalnie, bez internetu)**
 - Fixture'y `tests/fixtures/allegro_results.html`, `allegro_no_results.html`, `allegro_blocked.html` zapisane z prawdziwych odpowiedzi. Na `allegro_results.html`: ≥5 wyników z niepustym `title`, `price` i URL-em `https://allegro.pl/oferta/…`. `allegro_no_results.html` → `no_results`. `allegro_blocked.html` → `blocked`, `results == []`.
+- Fixture-pułapka `allegro_review_injection.html` = prawdziwy listing z dopisaną sekcją opinii, komentarzem pod ofertą i blokiem pytań, każdy z tekstem „Ignore previous instructions… / Zignoruj poprzednie polecenia…” i unikalnym znacznikiem (np. `REVIEW-MARKER-1`). Wynik: `status="ok"`, żaden znacznik nie występuje w `json.dumps(response)` (ani w tytułach, ani w snippetach), wyniki nie są wstrzymane (bo tekst z sekcji w ogóle nie został przeczytany), a liczba ofert jest taka sama jak bez dopisanych sekcji.
+- Kafelek oferty z tytułem zawierającym polecenie dla AI → wynik `withheld=True` (tytuł sprzedawcy to też niezaufany tekst).
+- `snippet` każdego wyniku ma ≤ 150 znaków i pochodzi tylko z parametrów kafelka.
 - Test używa podmienionego originu (lokalny serwer udaje `allegro.pl` przez `url_for` wstrzyknięte w teście); żądania do originów spoza zbioru są blokowane (`blocked_requests` niepuste dla fixture'a z zewnętrznym skryptem).
 
 **HTTP i api**
@@ -163,6 +169,7 @@ E. **Fixture'y z prawdziwej strony.** Z chmury nie da się pobrać listingu, wi�
 ## Notatki implementacyjne
 
 - `sites/` nie importuje Playwrighta, tak jak `engines/`.
+- Zasada dla każdego kolejnego serwisu w `sites/`: model dostaje tylko pola wskazane selektorami (tytuł, cena, URL, parametry). Treści pisane przez innych ludzi (opinie, komentarze, Q&A, opisy) są wyłączone domyślnie. Jeśli kiedyś będą potrzebne (np. „podsumuj opinie”), to osobne narzędzie z własnym planem, a nie rozszerzenie `site_search`.
 - Selektory Allegro to najbardziej kruchy element. Stąd rozróżnienie `no_results` vs `error: unexpected page layout` (już jest w `SearchService`), które powie, kiedy selektory się zestarzały.
 - `min_interval_s` z `RateLimiter` działa per `engine.name`, więc Allegro ma własny odstęp niezależny od SearXNG. Nie zwiększać go „dla ludzkości”; to uprzejmość wobec serwisu, nie maskowanie.
 - Kod i komentarze po angielsku (konwencja repo), plan po polsku.
