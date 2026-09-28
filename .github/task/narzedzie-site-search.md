@@ -169,6 +169,7 @@ E. **Fixture'y z prawdziwej strony.** Z chmury nie da się pobrać listingu, wi�
 ## Notatki implementacyjne
 
 - `sites/` nie importuje Playwrighta, tak jak `engines/`.
+- Modele Pydantic zamiast `dict` (reguła z `CLAUDE.md`): surowy wynik `extract_js` parsować na granicy do modelu (np. `RawOffer` z `title`, `href`, `price`, `snippet`, `is_ad`) i dalej przekazywać model. W `api` odpowiedź web-agent walidować do modelu `SearchResponse` po stronie `api` zamiast czytać `body.get(...)`. Przy okazji przepisać tak samo istniejące `build_results(raw: list[dict])` i `web_common.format_result(result: dict)`.
 - Zasada dla każdego kolejnego serwisu w `sites/`: model dostaje tylko pola wskazane selektorami (tytuł, cena, URL, parametry). Treści pisane przez innych ludzi (opinie, komentarze, Q&A, opisy) są wyłączone domyślnie. Jeśli kiedyś będą potrzebne (np. „podsumuj opinie”), to osobne narzędzie z własnym planem, a nie rozszerzenie `site_search`.
 - Selektory Allegro to najbardziej kruchy element. Stąd rozróżnienie `no_results` vs `error: unexpected page layout` (już jest w `SearchService`), które powie, kiedy selektory się zestarzały.
 - `min_interval_s` z `RateLimiter` działa per `engine.name`, więc Allegro ma własny odstęp niezależny od SearXNG. Nie zwiększać go „dla ludzkości”; to uprzejmość wobec serwisu, nie maskowanie.
