@@ -1,11 +1,10 @@
 import uuid
 from datetime import datetime
 
+from shared.db.base import Base
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
-
-from api.db.base import Base
 
 
 class ToolCallEvent(Base):

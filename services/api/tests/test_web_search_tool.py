@@ -2,9 +2,9 @@ import json
 
 import httpx
 import pytest
-
 from api.tools.base import ToolInputError
 from api.tools.registry import ToolRegistry
+from api.tools.web_agent import WebAgentClient
 from api.tools.web_search import WebSearchTool
 
 OK_BODY = {
@@ -28,7 +28,7 @@ OK_BODY = {
 
 def _tool(handler) -> WebSearchTool:
     return WebSearchTool(
-        base_url="http://web-agent", token="secret", timeout_s=5, transport=httpx.MockTransport(handler)
+        WebAgentClient(base_url="http://web-agent", token="secret", timeout_s=5, transport=httpx.MockTransport(handler))
     )
 
 
@@ -142,4 +142,4 @@ async def test_registry_shows_invalid_input_to_the_model() -> None:
     result = await registry.execute("web_search", {"query": ""})
 
     assert result.is_error
-    assert result.content == "Invalid input: query must be a non-empty string"
+    assert result.content == "Invalid input: query: String should have at least 1 character"

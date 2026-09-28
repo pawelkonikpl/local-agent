@@ -1,6 +1,6 @@
 from urllib.parse import urlencode
 
-from web_agent.engines.common import blocking_status, build_results, extract_js, http_url
+from web_agent.engines.common import MarkerEngine, build_results, extract_js, http_url
 from web_agent.models import SearchQuery, SearchResult
 
 # SearXNG's default ("simple") theme. Same rule as for DuckDuckGo: all selectors live here.
@@ -24,14 +24,14 @@ def language_for(region: str) -> str:
     return f"{language}-{country.upper()}"
 
 
-class SearxngEngine:
+class SearxngEngine(MarkerEngine):
     """A self-hosted SearXNG instance: a metasearch engine that queries the public engines itself,
     so the browser here only ever talks to our own server."""
 
     name = "searxng"
-    extra_origins: frozenset[str] = frozenset()
-    block_settle_s = 0.0
     extract_js = extract_js(result=RESULT_SELECTOR, title=TITLE_SELECTOR, snippet=SNIPPET_SELECTOR)
+    no_results_markers = NO_RESULTS_MARKERS
+    status_block_reason = "SearXNG answered HTTP {status}"
 
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url.rstrip("/")
@@ -42,11 +42,3 @@ class SearxngEngine:
 
     def parse(self, raw: list[dict], max_results: int) -> list[SearchResult]:
         return build_results(raw, max_results, http_url)
-
-    def detect_block(self, status: int | None, text: str) -> str | None:
-        if blocking_status(status):
-            return f"SearXNG answered HTTP {status}"
-        return None
-
-    def is_no_results(self, text: str) -> bool:
-        return any(marker in text for marker in NO_RESULTS_MARKERS)

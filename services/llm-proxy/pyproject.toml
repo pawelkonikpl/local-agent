@@ -1,7 +1,7 @@
 [project]
 name = "llm-proxy"
 version = "0.1.0"
-description = "local-agent llm-proxy: metered streaming forwarder in front of api.anthropic.com"
+description = "local-agent llm-proxy: metered, provider-agnostic streaming forwarder (Anthropic, OpenAI)"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
@@ -12,10 +12,12 @@ dependencies = [
     "openai>=1.50",
     "pydantic-settings>=2.6",
     "shared",
+    "contracts",
 ]
 
 [tool.uv.sources]
 shared = { workspace = true }
+contracts = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

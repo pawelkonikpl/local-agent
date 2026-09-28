@@ -1,0 +1,15 @@
+[project]
+name = "contracts"
+version = "0.1.0"
+description = "local-agent wire contracts between services: SSE framing, internal auth, llm-proxy and web-agent schemas"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/contracts"]

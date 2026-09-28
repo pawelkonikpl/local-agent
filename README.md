@@ -19,7 +19,7 @@ cp .env.example .env   # i uzupełnij SEED_ADMIN_PASSWORD, ANTHROPIC_API_KEY, IN
 # Postgres
 podman-compose up -d db
 
-# Backend: instalacja (api, llm-proxy, libs/shared przez workspace uv), migracje, seed admina
+# Backend: instalacja (serwisy i libs/* przez workspace uv), migracje, seed admina
 uv sync
 cd services/api && uv run alembic upgrade head && cd ../..
 uv run python scripts/seed_admin.py
@@ -40,7 +40,8 @@ cd gui && npm install && npm run dev
 `api` mówi do `llm-proxy` przez `LLM_PROXY_URL` + `INTERNAL_PROXY_TOKEN` (prosty współdzielony sekret w env,
 nie w Postgresie); `llm-proxy` ma własny, bezpośredni dostęp do Postgresa (`DATABASE_URL`) i jest jedynym
 serwisem, który zna prawdziwy `ANTHROPIC_API_KEY`. `llm-proxy` sam jest provider-agnostic: routing po polu
-`model` w requeście — `claude-*` idzie do Anthropica, cokolwiek innego do prawdziwego OpenAI (`OPENAI_API_KEY`, opcjonalne). `api` zawsze woła `llm-proxy`,
+`model` w requeście — `claude-*` idzie do Anthropica, identyfikatory pasujące do `OPENAI_MODELS_PATTERN` do
+prawdziwego OpenAI (`OPENAI_API_KEY`, opcjonalne); każdy backend sam mówi (`serves(model)`), które modele obsługuje. `api` zawsze woła `llm-proxy`,
 niezależnie od tego, który provider faktycznie obsłuży dany request. Listę modeli do wyboru w czacie
 (i dostępne poziomy reasoningu) `llm-proxy` bierze od samych providerów — każdy backend ma metodę
 `list_models()` (Anthropic: `GET /v1/models` z `capabilities.effort`, OpenAI: `models.list()` filtrowane
@@ -98,7 +99,10 @@ podman-compose up -d site-agent site-vnc
 services/api/         FastAPI: auth, RBAC, admin, chat (sesje/wiadomości/SSE), DB models, migracje Alembic
 services/llm-proxy/   FastAPI: metered streaming forwarder, provider-agnostic (Anthropic/OpenAI),
                       własny dostęp do Postgresa
+services/web-agent/   FastAPI + Playwright/CDP: wyszukiwarka dla narzędzi web_search i site_search
 libs/shared/          Wspólne definicje tabel SQLAlchemy (sessions, messages, token_usage, user_usage_*)
+libs/contracts/       Kontrakty między serwisami (tylko pydantic): ramki SSE, auth bearer, API llm-proxy
+                      i web-agent — obie strony importują te same modele zamiast trzymać kopie
 gui/                  React + Vite: login -> dashboard -> czat
 deploy/               Containerfile.{api,llm-proxy,gui,...}, konfiguracja nginx
 scripts/             seed_admin.py

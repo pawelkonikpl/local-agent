@@ -1,5 +1,5 @@
-"""Pieces every HTML-results engine shares: the DOM extraction script and turning raw entries
-into clean, deduplicated `SearchResult`s."""
+"""Pieces every HTML-results engine shares: the DOM extraction script, block and no-results
+detection by page markers, and turning raw entries into clean, deduplicated `SearchResult`s."""
 
 import json
 import logging
@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator
 from typing import Literal
 from urllib.parse import urldefrag, urlparse, urlunparse
 
+from contracts.web_agent import HIDDEN_UNICODE_FLAG, SPONSORED_FLAG
 from pydantic import ValidationError
 
 from web_agent.guard import domain_signals, injection_signals, sanitize
@@ -18,7 +19,6 @@ logger = logging.getLogger(__name__)
 SNIPPET_MAX_CHARS = 300
 WITHHELD_URL_MAX_CHARS = 200
 BLOCKING_STATUSES = frozenset({403, 429})
-SPONSORED_FLAG = "sponsored"
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -50,6 +50,34 @@ def http_url(url: str) -> str | None:
 
 def blocking_status(status: int | None) -> bool:
     return status is not None and (status in BLOCKING_STATUSES or status >= 500)
+
+
+class MarkerEngine:
+    """The `SearchEngine` parts that recognize a page by status and text markers.
+
+    A blocking HTTP status or any of `block_markers` in the page text is a block; any of
+    `no_results_markers` is an honest "nothing found". Engines set the markers and reasons and
+    add what's their own (`url_for`, `parse`, `extract_js`).
+    """
+
+    name: str
+    extra_origins: frozenset[str] = frozenset()
+    block_settle_s: float = 0.0
+    block_markers: tuple[str, ...] = ()
+    no_results_markers: tuple[str, ...] = ()
+    # `{status}` is filled in; the model and the user read both reasons.
+    status_block_reason: str
+    marker_block_reason: str = ""
+
+    def detect_block(self, status: int | None, text: str) -> str | None:
+        if blocking_status(status):
+            return self.status_block_reason.format(status=status)
+        if any(marker in text for marker in self.block_markers):
+            return self.marker_block_reason
+        return None
+
+    def is_no_results(self, text: str) -> bool:
+        return any(marker in text for marker in self.no_results_markers)
 
 
 def build_results(
@@ -90,7 +118,7 @@ def build_results(
         # Signals are computed on the full text, before the snippet is cut short.
         flags = injection_signals(f"{title.text}\n{snippet.text}\n{price.text}")
         if href.removed_tags or title.removed_tags or snippet.removed_tags or price.removed_tags:
-            flags.append("hidden_unicode")
+            flags.append(HIDDEN_UNICODE_FLAG)
         withheld = bool(flags)
         flags += domain_signals(url)
         if entry.is_ad:

@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "api",
+    "contracts",
     "llm-proxy",
     "shared",
     "web-agent",
@@ -74,6 +75,7 @@ dependencies = [
     { name = "alembic" },
     { name = "argon2-cffi" },
     { name = "asyncpg" },
+    { name = "contracts" },
     { name = "email-validator" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -89,6 +91,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.14" },
     { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "asyncpg", specifier = ">=0.30" },
+    { name = "contracts", editable = "libs/contracts" },
     { name = "email-validator", specifier = ">=2.2" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.27" },
@@ -438,6 +441,17 @@ wheels = [
 ]
 
 [[package]]
+name = "contracts"
+version = "0.1.0"
+source = { editable = "libs/contracts" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.9" }]
+
+[[package]]
 name = "dnspython"
 version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -782,6 +796,7 @@ version = "0.1.0"
 source = { editable = "services/llm-proxy" }
 dependencies = [
     { name = "asyncpg" },
+    { name = "contracts" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "openai" },
@@ -794,6 +809,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.30" },
+    { name = "contracts", editable = "libs/contracts" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "openai", specifier = ">=1.50" },
@@ -1449,6 +1465,7 @@ name = "web-agent"
 version = "0.1.0"
 source = { editable = "services/web-agent" }
 dependencies = [
+    { name = "contracts" },
     { name = "fastapi" },
     { name = "playwright" },
     { name = "pydantic-settings" },
@@ -1458,6 +1475,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "contracts", editable = "libs/contracts" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "playwright", specifier = ">=1.50" },
     { name = "pydantic-settings", specifier = ">=2.6" },

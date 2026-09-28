@@ -23,7 +23,7 @@ ENCODED_BLOB = re.compile(r"[A-Za-z0-9+/=_-]{40,}")
 class GenerationGuard:
     """Per-generation state: its canary and whether it has read untrusted content yet.
 
-    Created once per `run_generation`; the tool registry is shared across generations, so this
+    Created once per `ChatGeneration.run`; the tool registry is shared across generations, so this
     state can't live there.
     """
 

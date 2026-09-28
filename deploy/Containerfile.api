@@ -7,10 +7,12 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY services/api/pyproject.toml services/api/pyproject.toml
 COPY libs/shared/pyproject.toml libs/shared/pyproject.toml
+COPY libs/contracts/pyproject.toml libs/contracts/pyproject.toml
 RUN uv sync --frozen --no-install-workspace --no-dev --package api
 
 COPY services/api/src services/api/src
 COPY libs/shared/src libs/shared/src
+COPY libs/contracts/src libs/contracts/src
 RUN uv sync --frozen --no-dev --package api
 
 ENV PATH="/app/.venv/bin:${PATH}"

@@ -1,25 +1,17 @@
-import re
 from collections.abc import Sequence
 
-import httpx
-
-from api.tools.base import Capability, ToolInputError, ToolResult
-from api.tools.web_common import (
+from contracts.web_agent import (
     DEFAULT_MAX_RESULTS,
     MAX_RESULTS_LIMIT,
-    WITHHELD_NOTE,
-    WebAgentResponse,
-    call_web_agent,
-    format_result,
-    spotlight,
-    validate_max_results,
-    validate_query,
+    SEARCH_PATH,
+    SearchResponse,
+    WebSearchRequest,
 )
 
-REGION_PATTERN = re.compile(r"^[a-z]{2}-[a-z]{2}$")
+from api.tools.web_agent import WebAgentClient, WebAgentTool
 
 
-class WebSearchTool:
+class WebSearchTool(WebAgentTool[WebSearchRequest]):
     """`web_search`: web search results (title, URL, snippet) from the web-agent service.
 
     The browser runs in web-agent, a separate container with internet access and no route to
@@ -61,22 +53,13 @@ class WebSearchTool:
         "required": ["query"],
         "additionalProperties": False,
     }
-    # The query leaves for public search engines; the results are page text.
-    capabilities: frozenset[Capability] = frozenset({"reads_untrusted", "external_effect"})
+    request_model = WebSearchRequest
+    path = SEARCH_PATH
+    label = "Web search"
+    unreachable_message = "Web search service is unreachable"
 
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        token: str,
-        timeout_s: float,
-        transport: httpx.AsyncBaseTransport | None = None,
-        site_search_sites: Sequence[str] = (),
-    ) -> None:
-        self._base_url = base_url
-        self._token = token
-        self._timeout_s = timeout_s
-        self._transport = transport
+    def __init__(self, client: WebAgentClient, *, site_search_sites: Sequence[str] = ()) -> None:
+        super().__init__(client)
         if site_search_sites:
             # Otherwise small models reach for web_search with `site:` out of habit.
             self.description = (
@@ -84,45 +67,20 @@ class WebSearchTool:
                 "use site_search instead."
             )
 
-    async def run(self, input: dict) -> ToolResult:
-        payload = self._validate(input)
-        response = await call_web_agent(
-            base_url=self._base_url,
-            token=self._token,
-            timeout_s=self._timeout_s,
-            transport=self._transport,
-            path="/v1/search",
-            payload=payload,
-            label="Web search",
-            unreachable_message="Web search service is unreachable",
+    def _heading(self, request: WebSearchRequest, response: SearchResponse) -> str:
+        return f'Web results for "{response.query}":'
+
+    def _source(self, request: WebSearchRequest) -> str:
+        return "web_search"
+
+    def _no_results(self, request: WebSearchRequest, response: SearchResponse) -> str:
+        return f'No web results for "{response.query}".'
+
+    def _blocked(self, request: WebSearchRequest, response: SearchResponse) -> str:
+        return (
+            f"The search engine refused the request ({response.error}). Retrying now won't help; "
+            "answer without web results and tell the user the search was blocked."
         )
-        return response if isinstance(response, ToolResult) else _format(response)
 
-    @staticmethod
-    def _validate(input: dict) -> dict:
-        payload: dict = {"query": validate_query(input), "max_results": validate_max_results(input)}
-        region = input.get("region")
-        if region is not None:
-            if not isinstance(region, str) or not REGION_PATTERN.match(region):
-                raise ToolInputError("region must look like pl-pl, us-en or wt-wt")
-            payload["region"] = region
-        return payload
-
-
-def _format(body: WebAgentResponse) -> ToolResult:
-    if body.status == "ok":
-        lines = [f'Web results for "{body.query}":']
-        for result in body.results:
-            lines.extend(format_result(result))
-        if any(result.withheld for result in body.results):
-            lines.append(WITHHELD_NOTE)
-        return ToolResult(spotlight("\n".join(lines), source="web_search"))
-    if body.status == "no_results":
-        return ToolResult(f'No web results for "{body.query}".')
-    if body.status == "blocked":
-        return ToolResult(
-            f"The search engine refused the request ({body.error}). Retrying now won't help; "
-            "answer without web results and tell the user the search was blocked.",
-            is_error=True,
-        )
-    return ToolResult(f"Web search failed: {body.error or 'unknown error'}.", is_error=True)
+    def _failed(self, request: WebSearchRequest, response: SearchResponse) -> str:
+        return f"Web search failed: {response.error or 'unknown error'}."

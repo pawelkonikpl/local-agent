@@ -6,9 +6,14 @@ tested without any HTTP in the loop.
 
 import json
 
+from contracts.sse import encode_sse
 from openai.types.responses import ResponseStreamEvent, ResponseUsage
 
-from llm_proxy.backends.openai_translate import AnthropicStreamWriter, extract_text, reasoning_effort, sse
+from llm_proxy.backends.anthropic_sse import (
+    AnthropicStreamWriter,
+    extract_text,
+    reasoning_effort,
+)
 from llm_proxy.usage import UsageAccumulator
 
 
@@ -154,4 +159,4 @@ class ResponsesStreamTranslator(AnthropicStreamWriter):
 
     @staticmethod
     def _error(message: str) -> bytes:
-        return sse("error", {"type": "error", "error": {"type": "api_error", "message": message}})
+        return encode_sse("error", {"type": "error", "error": {"type": "api_error", "message": message}})

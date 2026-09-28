@@ -1,6 +1,6 @@
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
-from web_agent.engines.common import blocking_status, build_results, extract_js, http_url
+from web_agent.engines.common import MarkerEngine, build_results, extract_js, http_url
 from web_agent.models import SearchQuery, SearchResult
 
 # The JS-free HTML frontend: stable server-rendered markup, no client-side rendering to wait for.
@@ -40,26 +40,18 @@ def _resolve_href(href: str) -> str | None:
     return http_url(url)
 
 
-class DuckDuckGoEngine:
+class DuckDuckGoEngine(MarkerEngine):
     name = "duckduckgo"
-    extra_origins: frozenset[str] = frozenset()
-    block_settle_s = 0.0
     extract_js = extract_js(
         result=RESULT_SELECTOR, title=TITLE_SELECTOR, snippet=SNIPPET_SELECTOR, ad_class=AD_CLASS
     )
+    block_markers = BLOCK_MARKERS
+    no_results_markers = NO_RESULTS_MARKERS
+    status_block_reason = "DuckDuckGo answered HTTP {status}"
+    marker_block_reason = "DuckDuckGo served its bot challenge instead of results"
 
     def url_for(self, query: SearchQuery, region: str) -> str:
         return f"{BASE_URL}?{urlencode({'q': query.query, 'kl': region})}"
 
     def parse(self, raw: list[dict], max_results: int) -> list[SearchResult]:
         return build_results(raw, max_results, _resolve_href)
-
-    def detect_block(self, status: int | None, text: str) -> str | None:
-        if blocking_status(status):
-            return f"DuckDuckGo answered HTTP {status}"
-        if any(marker in text for marker in BLOCK_MARKERS):
-            return "DuckDuckGo served its bot challenge instead of results"
-        return None
-
-    def is_no_results(self, text: str) -> bool:
-        return any(marker in text for marker in NO_RESULTS_MARKERS)

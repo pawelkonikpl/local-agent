@@ -2,8 +2,9 @@ import re
 from collections.abc import AsyncIterator
 
 import openai
+from contracts.llm_proxy import ModelInfo
 
-from llm_proxy.backends.base import ModelInfo, UpstreamError
+from llm_proxy.backends.base import UpstreamError
 from llm_proxy.backends.openai_responses_translate import (
     ResponsesStreamTranslator,
     to_responses_input,
@@ -24,8 +25,9 @@ class OpenAIResponsesBackend:
     history has no slot for OpenAI's reasoning items.
 
     OpenAI's `/v1/models` lists every model the key can reach (embeddings, TTS, image, dated
-    snapshots...) and says nothing about what each one supports, so `list_models` keeps only
-    the ids matching `model_pattern` and gives each the same `reasoning_efforts`.
+    snapshots...) and says nothing about what each one supports, so this backend serves (and
+    `list_models` offers) only the ids matching `model_pattern`, each with the same
+    `reasoning_efforts`.
     """
 
     def __init__(
@@ -34,6 +36,9 @@ class OpenAIResponsesBackend:
         self._client = client
         self._model_pattern = re.compile(model_pattern)
         self._reasoning_efforts = reasoning_efforts
+
+    def serves(self, model: str) -> bool:
+        return self._model_pattern.fullmatch(model) is not None
 
     async def list_models(self) -> list[ModelInfo]:
         try:
@@ -45,7 +50,7 @@ class OpenAIResponsesBackend:
         return [
             ModelInfo(id=model.id, reasoning_efforts=self._reasoning_efforts)
             for model in sorted(listed, key=lambda model: model.created, reverse=True)
-            if self._model_pattern.fullmatch(model.id)
+            if self.serves(model.id)
         ]
 
     async def stream(self, payload: dict, usage: UsageAccumulator) -> AsyncIterator[bytes]:

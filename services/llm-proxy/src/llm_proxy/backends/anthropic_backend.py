@@ -1,13 +1,15 @@
-import json
 from collections.abc import AsyncIterator
 
 import httpx
+from contracts.llm_proxy import ModelInfo
+from contracts.sse import encode_sse, iter_sse
 from pydantic import BaseModel, ConfigDict
 
-from llm_proxy.backends.base import ModelInfo, UpstreamError
+from llm_proxy.backends.base import UpstreamError
 from llm_proxy.usage import UsageAccumulator
 
 ANTHROPIC_VERSION = "2023-06-01"
+MODEL_PREFIX = "claude-"
 # The Models API's page size cap -- one page covers every model an org has today.
 _MODELS_PAGE_LIMIT = 1000
 
@@ -55,8 +57,8 @@ def build_anthropic_client(base_url: str) -> httpx.AsyncClient:
 
 
 class AnthropicBackend:
-    """Real Claude. Pure passthrough to `api.anthropic.com` -- upstream already speaks the
-    wire format this proxy emits, so bytes are forwarded as-is (re-framed line by line, not
+    """Real Claude. Passthrough to `api.anthropic.com` -- upstream already speaks the wire
+    format this proxy emits, so its events are forwarded unchanged (re-encoded, so not
     necessarily byte-identical to what Anthropic sent)."""
 
     def __init__(self, client: httpx.AsyncClient, api_key: str) -> None:
@@ -69,6 +71,9 @@ class AnthropicBackend:
             "anthropic-version": ANTHROPIC_VERSION,
             "content-type": "application/json",
         }
+
+    def serves(self, model: str) -> bool:
+        return model.startswith(MODEL_PREFIX)
 
     async def list_models(self) -> list[ModelInfo]:
         """Every model the API key can use (`GET /v1/models`, newest first), with the effort
@@ -100,18 +105,6 @@ class AnthropicBackend:
                 body = await response.aread()
                 raise UpstreamError(response.status_code, body.decode("utf-8", errors="replace"))
 
-            event_type: str | None = None
-            async for line in response.aiter_lines():
-                if line.startswith("event:"):
-                    event_type = line[len("event:") :].strip()
-                    yield f"{line}\n".encode()
-                elif line.startswith("data:"):
-                    raw_data = line[len("data:") :].strip()
-                    if event_type is not None and raw_data:
-                        try:
-                            usage.observe(event_type, json.loads(raw_data))
-                        except json.JSONDecodeError:
-                            pass
-                    yield f"{line}\n".encode()
-                else:
-                    yield b"\n"
+            async for event, data in iter_sse(response.aiter_lines()):
+                usage.observe(event, data)
+                yield encode_sse(event, data)

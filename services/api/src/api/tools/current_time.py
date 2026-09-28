@@ -2,9 +2,15 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from api.tools.base import Capability, ToolInputError, ToolResult
+from pydantic import BaseModel
+
+from api.tools.base import Capability, ToolInputError, ToolResult, parse_input
 
 DEFAULT_TIMEZONE = "UTC"
+
+
+class CurrentTimeInput(BaseModel):
+    timezone: str = DEFAULT_TIMEZONE
 
 
 def _utc_now() -> datetime:
@@ -39,9 +45,7 @@ class CurrentTimeTool:
         self._now = now
 
     async def run(self, input: dict) -> ToolResult:
-        timezone_name = input.get("timezone", DEFAULT_TIMEZONE)
-        if not isinstance(timezone_name, str):
-            raise ToolInputError("timezone must be a string")
+        timezone_name = parse_input(CurrentTimeInput, input).timezone
         try:
             zone = ZoneInfo(timezone_name)
         except (ZoneInfoNotFoundError, ValueError) as exc:

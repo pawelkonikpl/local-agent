@@ -6,6 +6,7 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
 COPY services/web-agent/pyproject.toml services/web-agent/pyproject.toml
+COPY libs/contracts/pyproject.toml libs/contracts/pyproject.toml
 RUN uv sync --frozen --no-install-workspace --no-dev --package web-agent
 
 # Headless shell only (no headful Chromium in the image); system libraries need root, so this
@@ -14,6 +15,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN .venv/bin/playwright install --with-deps --only-shell chromium
 
 COPY services/web-agent/src services/web-agent/src
+COPY libs/contracts/src libs/contracts/src
 RUN uv sync --frozen --no-dev --package web-agent
 
 RUN useradd -u 10001 -M -d /tmp appuser

@@ -9,7 +9,11 @@ dependencies = [
     "pydantic-settings>=2.6",
     "playwright>=1.50",
     "tldextract>=5.1",
+    "contracts",
 ]
+
+[tool.uv.sources]
+contracts = { workspace = true }
 
 [project.scripts]
 web-agent = "web_agent.cli:main"

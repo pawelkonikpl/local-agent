@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 
+from contracts.llm_proxy import ModelInfo
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -33,15 +34,12 @@ class CreateMessageRequest(BaseModel):
     reasoning_effort: str | None = None
 
 
-class ModelOut(BaseModel):
-    id: str
-    # Empty when the model offers no reasoning setting.
-    reasoning_efforts: list[str]
-
-
 class ModelsOut(BaseModel):
-    models: list[ModelOut]
+    models: list[ModelInfo]
     default: str
+
+    def get(self, model_id: str) -> ModelInfo | None:
+        return next((model for model in self.models if model.id == model_id), None)
 
 
 class SessionUsageOut(BaseModel):

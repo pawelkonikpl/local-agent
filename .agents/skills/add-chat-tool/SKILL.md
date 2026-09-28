@@ -6,23 +6,32 @@ description: How to add a new tool the chat model can call in local-agent (the `
 # Adding a chat tool
 
 Tools live in the `api` service and run inside its process, in the model/tool loop in
-`services/api/src/api/chat/streaming.py` (`run_generation`). The loop, llm-proxy, the
+`services/api/src/api/chat/streaming.py` (`ChatGeneration`). The loop, llm-proxy, the
 provider translation (Claude and OpenAI) and the GUI are all generic: **a new tool
 only needs a new class and one line in the registry.** Do not touch `streaming.py`,
 llm-proxy or the GUI to add a tool.
 
 Read these before writing anything:
 
-- `services/api/src/api/tools/base.py`: the `Tool` protocol, `ToolResult`, `ToolInputError`
+- `services/api/src/api/tools/base.py`: the `Tool` protocol, `ToolResult`, `ToolInputError`, `parse_input`
 - `services/api/src/api/tools/registry.py`: `ToolRegistry` and `build_default_registry()`
 - `services/api/src/api/tools/current_time.py`: the reference tool; copy its structure
+- `services/api/src/api/tools/web_agent.py`: `WebAgentTool`, the base for tools served by web-agent
+  (`web_search`, `site_search`). A new web-agent-backed tool subclasses it and only writes its
+  texts; its request model goes into `libs/contracts/src/contracts/web_agent.py`, shared with web-agent.
 
 ## Steps
 
 1. **Create `services/api/src/api/tools/<tool_name>.py`** with one class that satisfies `Tool`:
 
    ```python
-   from api.tools.base import ToolInputError, ToolResult
+   from pydantic import BaseModel, Field
+
+   from api.tools.base import ToolResult, parse_input
+
+
+   class ExampleInput(BaseModel):
+       query: str = Field(min_length=1)
 
 
    class ExampleTool:
@@ -46,9 +55,7 @@ Read these before writing anything:
            ...
 
        async def run(self, input: dict) -> ToolResult:
-           query = input.get("query")
-           if not isinstance(query, str) or not query.strip():
-               raise ToolInputError("query must be a non-empty string")
+           request = parse_input(ExampleInput, input)  # ToolInputError naming each bad field
            ...
            return ToolResult("compact, readable text for the model")
    ```
@@ -91,9 +98,11 @@ Read these before writing anything:
 - Keep it flat and small: a few primitive properties, each with a `description` that includes an
   example, `required` listed, `"additionalProperties": false`. Nested objects and
   `oneOf`/`anyOf` are handled badly by small models.
-- **Nothing validates input against the schema.** `run()` must check every field it uses
-  (type, range, allowed values) and raise `ToolInputError` with a message the model can act
-  on. Optional fields need a default (see `DEFAULT_TIMEZONE` in `current_time.py`).
+- **Nothing validates input against the schema.** `run()` parses `input` into a Pydantic model
+  with `parse_input(Model, input)`: strict types, constraints as `Field(...)`, a default for every
+  optional field (see `CurrentTimeInput`). It raises `ToolInputError` naming each bad field, which
+  the model sees and can act on. Checks a model can't express (e.g. a value from a runtime list)
+  raise `ToolInputError` after parsing.
 
 **`run(input) -> ToolResult`**
 - `async`, and must not block the event loop: it shares the process with every user's
@@ -134,8 +143,6 @@ Read these before writing anything:
    LLM_PROXY_URL=http://unused INTERNAL_PROXY_TOKEN=test \
    uv run pytest services/api/tests -q
    ```
-   `test_post_message_streams_deltas_and_persists_both_messages` fails regardless of any tool change
-   (`run_generation` writes outside the test transaction), so don't try to fix it as part of a tool task.
 2. Rebuild and restart only `api`:
    ```bash
    podman-compose build api && podman-compose up -d --no-deps --force-recreate api

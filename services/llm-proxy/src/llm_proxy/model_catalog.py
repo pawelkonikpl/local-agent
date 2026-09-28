@@ -3,7 +3,9 @@ import logging
 import time
 from collections.abc import Sequence
 
-from llm_proxy.backends.base import LLMBackend, ModelInfo, UpstreamError
+from contracts.llm_proxy import ModelInfo
+
+from llm_proxy.backends.base import LLMBackend, UpstreamError
 
 logger = logging.getLogger(__name__)
 

@@ -16,9 +16,11 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
 COPY services/web-agent/pyproject.toml services/web-agent/pyproject.toml
+COPY libs/contracts/pyproject.toml libs/contracts/pyproject.toml
 RUN uv sync --frozen --no-install-workspace --no-dev --package web-agent
 # No Playwright browsers: web-agent only attaches to Chrome over CDP here.
 COPY services/web-agent/src services/web-agent/src
+COPY libs/contracts/src libs/contracts/src
 RUN uv sync --frozen --no-dev --package web-agent
 
 COPY --chmod=755 deploy/site-agent/entrypoint.sh /usr/local/bin/site-agent-entrypoint

@@ -1,4 +1,5 @@
-from web_agent.engines.common import SPONSORED_FLAG
+from contracts.web_agent import SPONSORED_FLAG
+
 from web_agent.models import SearchResponse, SearchResult
 
 

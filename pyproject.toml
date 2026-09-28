@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["services/api", "services/llm-proxy", "services/web-agent", "libs/shared"]
+members = ["services/api", "services/llm-proxy", "services/web-agent", "libs/shared", "libs/contracts"]
 
 [dependency-groups]
 dev = [

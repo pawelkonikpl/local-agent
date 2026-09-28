@@ -50,7 +50,6 @@ services:
       dockerfile: deploy/Containerfile.llm-proxy
     environment:
       DATABASE_URL: postgresql+asyncpg://local_agent:local_agent@db:5432/local_agent
-      ENVIRONMENT: development
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       INTERNAL_PROXY_TOKEN: ${INTERNAL_PROXY_TOKEN}

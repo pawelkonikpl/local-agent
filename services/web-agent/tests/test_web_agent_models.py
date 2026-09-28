@@ -1,7 +1,8 @@
 import pytest
+from contracts.web_agent import HIDDEN_UNICODE_FLAG, INJECTION_FLAGS
 from pydantic import ValidationError
-
 from web_agent.formatting import format_text
+from web_agent.guard.injection import PATTERNS
 from web_agent.models import SearchQuery, SearchResponse, SearchResult
 
 
@@ -49,3 +50,8 @@ def test_format_text_blocked_is_one_sentence_with_reason() -> None:
 
     assert "HTTP 429" in text
     assert "\n" not in text
+
+
+def test_injection_patterns_match_the_contract_flags() -> None:
+    # api names a withheld result's reasons from `INJECTION_FLAGS`; each must be a real signal.
+    assert set(PATTERNS) | {HIDDEN_UNICODE_FLAG} == INJECTION_FLAGS

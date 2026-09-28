@@ -15,10 +15,12 @@ dependencies = [
     "httpx>=0.27",
     "tzdata>=2024.1",
     "shared",
+    "contracts",
 ]
 
 [tool.uv.sources]
 shared = { workspace = true }
+contracts = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

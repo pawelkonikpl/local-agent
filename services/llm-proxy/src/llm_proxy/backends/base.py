@@ -1,7 +1,7 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Protocol
 
-from pydantic import BaseModel
+from contracts.llm_proxy import ModelInfo
 
 from llm_proxy.usage import UsageAccumulator
 
@@ -14,20 +14,18 @@ class UpstreamError(Exception):
         self.status_code = status_code
 
 
-class ModelInfo(BaseModel):
-    """A model a provider serves, as offered to api's model picker."""
+class NoBackendError(Exception):
+    """No configured provider serves the requested model."""
 
-    id: str
-    # Levels of Anthropic's `output_config.effort` the model accepts; empty = no reasoning setting.
-    reasoning_efforts: list[str] = []
+    def __init__(self, model: str) -> None:
+        super().__init__(f"No configured provider serves model {model!r}")
 
 
 class LLMBackend(Protocol):
     """Whatever wire protocol the upstream provider speaks, `stream` always yields raw
-    Anthropic Messages API SSE lines (`event: ...` / `data: ...`) -- the one contract
-    session-agent's `anthropic` SDK understands, regardless of which provider actually served
-    the request. Raises `UpstreamError` if the upstream rejects the request before any bytes
-    are streamed back.
+    Anthropic Messages API SSE lines (`event: ...` / `data: ...`) -- the one contract api
+    understands, regardless of which provider actually served the request. Raises
+    `UpstreamError` if the upstream rejects the request before any bytes are streamed back.
 
     Tool calling is part of the contract, implemented natively per provider: a backend must
     accept `tools` / `tool_choice` and `tool_use` / `tool_result` blocks in `messages`, and
@@ -38,11 +36,27 @@ class LLMBackend(Protocol):
     Reasoning depth likewise travels as Anthropic's `output_config.effort`; a backend maps it
     onto its provider's own knob (or passes it through, for Claude).
 
-    `list_models` asks the provider which models it serves right now (and which effort levels
-    each accepts), so no model list is hardcoded on either side of the proxy. Raises
-    `UpstreamError` if the provider can't be asked.
+    `serves` says whether a model id belongs to this provider, so requests are routed without a
+    central list of prefixes. `list_models` asks the provider which models it serves right now
+    (and which effort levels each accepts), so no model list is hardcoded on either side of the
+    proxy. Raises `UpstreamError` if the provider can't be asked.
     """
+
+    def serves(self, model: str) -> bool: ...
 
     def stream(self, payload: dict, usage: UsageAccumulator) -> AsyncIterator[bytes]: ...
 
     async def list_models(self) -> list[ModelInfo]: ...
+
+
+class BackendRouter:
+    """The configured backends, in priority order: the first one that `serves` a model gets it."""
+
+    def __init__(self, backends: Sequence[LLMBackend]) -> None:
+        self.backends = tuple(backends)
+
+    def for_model(self, model: str) -> LLMBackend:
+        for backend in self.backends:
+            if backend.serves(model):
+                return backend
+        raise NoBackendError(model)

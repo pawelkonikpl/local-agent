@@ -11,3 +11,8 @@ AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with AsyncSessionLocal() as session:
         yield session
+
+
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    """For work that outlives the request (a chat generation) and so opens its own sessions."""
+    return AsyncSessionLocal

@@ -14,7 +14,7 @@ semantics (`article`, `h2 a`, the price's `aria-label`) rather than generated cl
 import json
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
-from web_agent.engines.common import blocking_status, build_results
+from web_agent.engines.common import MarkerEngine, build_results
 from web_agent.models import SearchQuery, SearchResult, SortOrder
 
 BASE_URL = "https://allegro.pl"
@@ -116,7 +116,7 @@ def allegro_url(href: str, *, follow_tracker: bool = True) -> str | None:
     return None
 
 
-class AllegroSite:
+class AllegroSite(MarkerEngine):
     name = "allegro.pl"
     # PROVISIONAL, to be confirmed in DevTools (Network: Script, Stylesheet, XHR/Fetch) on the real
     # listing. The captcha-delivery.com origins serve DataDome's challenge (seen in its 403 page):
@@ -133,6 +133,10 @@ class AllegroSite:
     # DataDome first serves a fresh profile a 403 page running an invisible device check
     # (`ct.captcha-delivery.com/i.js`), which reloads the page once passed.
     block_settle_s = 10.0
+    block_markers = BLOCK_MARKERS
+    no_results_markers = NO_RESULTS_MARKERS
+    status_block_reason = "allegro.pl bot protection (HTTP {status})"
+    marker_block_reason = "allegro.pl bot protection (captcha)"
 
     def url_for(self, query: SearchQuery, region: str | None = None) -> str:
         """The listing URL; Allegro is Polish-only, so `region` is ignored."""
@@ -143,13 +147,3 @@ class AllegroSite:
 
     def parse(self, raw: list[dict], max_results: int) -> list[SearchResult]:
         return build_results(raw, max_results, allegro_url, ads="flag", snippet_max_chars=SNIPPET_MAX_CHARS)
-
-    def detect_block(self, status: int | None, text: str) -> str | None:
-        if blocking_status(status):
-            return f"allegro.pl bot protection (HTTP {status})"
-        if any(marker in text for marker in BLOCK_MARKERS):
-            return "allegro.pl bot protection (captcha)"
-        return None
-
-    def is_no_results(self, text: str) -> bool:
-        return any(marker in text for marker in NO_RESULTS_MARKERS)

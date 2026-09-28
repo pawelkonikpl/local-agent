@@ -1,14 +1,11 @@
-"""The Anthropic SSE writer and small helpers used by the Responses API translator
-(`openai_responses_translate`)."""
+"""Emitting Anthropic Messages SSE for a stream translated from another provider, plus the small
+readers of Anthropic request fields every translating backend needs."""
 
-import json
 import uuid
 
+from contracts.sse import encode_sse
+
 from llm_proxy.usage import UsageAccumulator
-
-
-def sse(event: str, data: dict) -> bytes:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
 def extract_text(content: str | list[dict] | None) -> str:
@@ -43,7 +40,7 @@ class AnthropicStreamWriter:
 
     def start(self) -> list[bytes]:
         return [
-            sse(
+            encode_sse(
                 "message_start",
                 {
                     "type": "message_start",
@@ -68,7 +65,7 @@ class AnthropicStreamWriter:
             events += self._open_block({"type": "text", "text": ""}, is_text=True)
         events += self._close_open_block()
         events.append(
-            sse(
+            encode_sse(
                 "message_delta",
                 {
                     "type": "message_delta",
@@ -77,7 +74,7 @@ class AnthropicStreamWriter:
                 },
             )
         )
-        events.append(sse("message_stop", {"type": "message_stop"}))
+        events.append(encode_sse("message_stop", {"type": "message_stop"}))
         return events
 
     def _text_delta(self, text: str) -> list[bytes]:
@@ -99,7 +96,7 @@ class AnthropicStreamWriter:
         self._open_is_text = is_text
         self._next_index += 1
         events.append(
-            sse(
+            encode_sse(
                 "content_block_start",
                 {"type": "content_block_start", "index": self._open_index, "content_block": content_block},
             )
@@ -110,8 +107,8 @@ class AnthropicStreamWriter:
         if self._open_index is None:
             return []
         index, self._open_index = self._open_index, None
-        return [sse("content_block_stop", {"type": "content_block_stop", "index": index})]
+        return [encode_sse("content_block_stop", {"type": "content_block_stop", "index": index})]
 
     @staticmethod
     def _delta(index: int, delta: dict) -> bytes:
-        return sse("content_block_delta", {"type": "content_block_delta", "index": index, "delta": delta})
+        return encode_sse("content_block_delta", {"type": "content_block_delta", "index": index, "delta": delta})
