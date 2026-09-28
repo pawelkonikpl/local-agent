@@ -1,0 +1,12 @@
+# noVNC: the site-agent browser's screen in the user's own browser (http://localhost:6080), for
+# solving a bot check the agent must never touch itself.
+FROM docker.io/library/debian:trixie-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends novnc websockify \
+    && rm -rf /var/lib/apt/lists/*
+
+USER nobody
+EXPOSE 6080
+
+CMD ["websockify", "--web", "/usr/share/novnc", "6080", "site-agent:5900"]

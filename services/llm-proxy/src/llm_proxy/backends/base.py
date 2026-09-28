@@ -1,6 +1,8 @@
 from collections.abc import AsyncIterator
 from typing import Protocol
 
+from pydantic import BaseModel
+
 from llm_proxy.usage import UsageAccumulator
 
 
@@ -10,6 +12,14 @@ class UpstreamError(Exception):
     def __init__(self, status_code: int, message: str) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+class ModelInfo(BaseModel):
+    """A model a provider serves, as offered to api's model picker."""
+
+    id: str
+    # Levels of Anthropic's `output_config.effort` the model accepts; empty = no reasoning setting.
+    reasoning_efforts: list[str] = []
 
 
 class LLMBackend(Protocol):
@@ -27,6 +37,12 @@ class LLMBackend(Protocol):
 
     Reasoning depth likewise travels as Anthropic's `output_config.effort`; a backend maps it
     onto its provider's own knob (or passes it through, for Claude).
+
+    `list_models` asks the provider which models it serves right now (and which effort levels
+    each accepts), so no model list is hardcoded on either side of the proxy. Raises
+    `UpstreamError` if the provider can't be asked.
     """
 
     def stream(self, payload: dict, usage: UsageAccumulator) -> AsyncIterator[bytes]: ...
+
+    async def list_models(self) -> list[ModelInfo]: ...

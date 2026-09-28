@@ -7,7 +7,7 @@ description: How to add a new tool the chat model can call in local-agent (the `
 
 Tools live in the `api` service and run inside its process, in the model/tool loop in
 `services/api/src/api/chat/streaming.py` (`run_generation`). The loop, llm-proxy, the
-provider translation (Claude and `local-model`) and the GUI are all generic: **a new tool
+provider translation (Claude and OpenAI) and the GUI are all generic: **a new tool
 only needs a new class and one line in the registry.** Do not touch `streaming.py`,
 llm-proxy or the GUI to add a tool.
 
@@ -81,13 +81,13 @@ Read these before writing anything:
 
 **`description`**
 - In English, 1–3 sentences: what the tool returns, and when the model should call it.
-- This text is the only thing the model knows about the tool. The small `local-model`
-  (Qwen3.5 4B) decides whether to call a tool almost entirely from it. Make the trigger
-  explicit ("Use it whenever the answer depends on …").
+- This text is the only thing the model knows about the tool; smaller models decide whether to
+  call a tool almost entirely from it. Make the trigger explicit ("Use it whenever the answer
+  depends on …").
 
 **`input_schema`**
 - A JSON Schema object, sent 1:1 as Anthropic `input_schema` and translated to an OpenAI
-  function `parameters` for `local-model`.
+  function `parameters` for the `gpt-*` models.
 - Keep it flat and small: a few primitive properties, each with a `description` that includes an
   example, `required` listed, `"additionalProperties": false`. Nested objects and
   `oneOf`/`anyOf` are handled badly by small models.
@@ -141,13 +141,13 @@ Read these before writing anything:
    podman-compose build api && podman-compose up -d --no-deps --force-recreate api
    ```
 3. In the chat, ask something that should trigger the tool, once with a Claude model and once with
-   `local-model`. The GUI shows each call as a collapsible box with its input and result. Also
+   a `gpt-*` model. The GUI shows each call as a collapsible box with its input and result. Also
    check the audit trail:
    ```bash
    podman exec local-agent_db_1 psql -U local_agent -d local_agent -c \
      "select tool_name, status, input, left(output::text, 100) from tool_call_events order by created_at desc limit 5"
    ```
-4. If `local-model` doesn't call the tool, improve the `description` first (explicit trigger,
+4. If a model doesn't call the tool, improve the `description` first (explicit trigger,
    example input). If it calls the tool with bad arguments, tighten the property `description`s and
    the `ToolInputError` messages. Don't change the loop.
 

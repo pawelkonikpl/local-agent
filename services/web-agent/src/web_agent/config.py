@@ -28,5 +28,19 @@ class Settings(BaseSettings):
     min_interval_s: float = 1.0
     default_region: str = "pl-pl"
 
+    # `site_search` runs in its own instance (compose: `site-agent`), attached to a headful Chrome.
+    # `sites_enabled` serves /v1/site-search and /v1/sites; `sites_only` also switches /v1/search
+    # off, so web searches never reach that browser. The `web-agent` instance keeps both off: sites
+    # never reach the headless browser.
+    sites_enabled: bool = False
+    sites_only: bool = False
+    # With `cdp_url`: a new tab in the browser's own (default) context per search instead of a
+    # fresh context, so a bot-check cookie a person earned in that profile carries over.
+    reuse_default_context: bool = False
+
+    @property
+    def serves_sites(self) -> bool:
+        return self.sites_enabled or self.sites_only
+
 
 settings = Settings()

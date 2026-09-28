@@ -10,7 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionm
 import shared.db.models as shared_models
 from llm_proxy.config import settings
 from llm_proxy.db import get_db
-from llm_proxy.main import app, get_anthropic_client, get_local_model_client, get_openai_client
+from llm_proxy.main import app, get_anthropic_client, get_model_catalog, get_openai_client
+from llm_proxy.model_catalog import ModelCatalog
 
 # `shared.db.base.Base` is the exact same class api's models attach to (see libs/shared/src/shared/db/base.py),
 # so its `.metadata` may hold api-owned tables too when both test suites run in one process. Scope DDL to just
@@ -127,13 +128,13 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
         # exercising the OpenAI-routed path override this again with a mocked client.
         return None
 
-    async def _override_get_local_model_client() -> None:
-        return None
+    # A fresh catalog per test, so no test sees models another one cached.
+    catalog = ModelCatalog(ttl_s=600)
 
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_anthropic_client] = _override_get_anthropic_client
     app.dependency_overrides[get_openai_client] = _override_get_openai_client
-    app.dependency_overrides[get_local_model_client] = _override_get_local_model_client
+    app.dependency_overrides[get_model_catalog] = lambda: catalog
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

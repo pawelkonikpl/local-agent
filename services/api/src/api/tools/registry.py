@@ -6,6 +6,7 @@ from api.config import settings
 from api.tools.base import Tool, ToolInputError, ToolResult
 from api.tools.current_time import CurrentTimeTool
 from api.tools.guard import GenerationGuard
+from api.tools.site_search import SiteSearchTool
 from api.tools.web_search import WebSearchTool
 
 logger = logging.getLogger(__name__)
@@ -75,12 +76,24 @@ class ToolRegistry:
 
 def build_default_registry() -> ToolRegistry:
     tools: list[Tool] = [CurrentTimeTool()]
+    sites = settings.web_agent_sites if settings.web_agent_sites_url else []
     if settings.web_agent_url:
         tools.append(
             WebSearchTool(
                 base_url=settings.web_agent_url,
                 token=settings.internal_proxy_token,
                 timeout_s=settings.web_search_timeout_s,
+                site_search_sites=sites,
+            )
+        )
+    if settings.web_agent_sites_url and sites:
+        tools.append(
+            SiteSearchTool(
+                base_url=settings.web_agent_sites_url,
+                token=settings.internal_proxy_token,
+                timeout_s=settings.web_search_timeout_s,
+                sites=sites,
+                view_url=settings.site_browser_view_url,
             )
         )
     return ToolRegistry(

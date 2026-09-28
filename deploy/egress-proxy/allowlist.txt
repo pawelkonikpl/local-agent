@@ -1,3 +1,9 @@
 # Hosts web-agent's browser may reach, one fnmatch pattern per line (see tinyproxy.conf).
 # Edited by people in this repo -- never by a page or the model. Each tool that needs the internet
 # adds its own hosts here under a comment naming the tool.
+
+# site_search: allegro.pl (the listing, its static assets, DataDome's challenge for a person to solve)
+allegro.pl
+assets.allegrostatic.com
+geo.captcha-delivery.com
+ct.captcha-delivery.com

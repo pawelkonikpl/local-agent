@@ -48,7 +48,8 @@ class SearchService:
     """Runs one search as a Sense-Act-Verify loop on rung 1 of the ladder (navigation + DOM).
 
     `search` never raises for page or network trouble: every outcome is a `SearchResponse` the
-    model can read. A block ends the search -- no retries, no climbing the ladder.
+    model can read. A block ends the search -- no retries, no climbing the ladder. `engine` is a
+    web search engine or a site searched through its own search page (`web_agent.sites`).
     """
 
     def __init__(
@@ -90,17 +91,26 @@ class SearchService:
             async with asyncio.timeout(self._timeout_s):
                 async with (
                     self._limiter.slot(engine.name),
-                    self._manager.session(allowed_origins=allowed_origins) as session,
+                    self._manager.session(allowed_origins=allowed_origins, hold_key=engine.name) as session,
                 ):
                     console_errors = session.console_errors
                     audit.blocked_requests = session.blocked_requests
                     # Act
                     outcome = await session.navigate(url)
-                    if on_page is not None:
-                        await on_page(session)
                     # Verify: the document status comes from the Network domain, the text from the DOM.
                     text = await session.text_content()
-                    if reason := engine.detect_block(outcome.status, text):
+                    reason = engine.detect_block(outcome.status, text)
+                    if reason and engine.block_settle_s > 0:
+                        # A JS bot check may pass on its own and reload the page; we only wait.
+                        reloaded = await session.wait_for_reload(engine.block_settle_s)
+                        if reloaded is not None:
+                            text = await session.text_content()
+                            reason = engine.detect_block(reloaded.status, text)
+                    if on_page is not None:
+                        await on_page(session)
+                    if reason:
+                        # A person may solve the check in this tab (site browser only); never us.
+                        session.keep_open_for_human()
                         return respond("blocked", error=reason)
                     # Sense
                     raw = await session.evaluate(engine.extract_js)
@@ -157,6 +167,7 @@ def build_search_service(settings: Settings) -> tuple[BrowserManager, SearchServ
         navigation_timeout_s=settings.navigation_timeout_s,
         proxy_url=settings.proxy_url,
         proxy_bypass=settings.proxy_bypass,
+        reuse_default_context=settings.reuse_default_context,
     )
     limiter = RateLimiter(max_concurrent=settings.max_concurrent_searches, min_interval_s=settings.min_interval_s)
     service = SearchService(

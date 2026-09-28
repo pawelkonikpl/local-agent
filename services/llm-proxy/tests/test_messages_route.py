@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_proxy import metering
 from llm_proxy.config import settings
-from llm_proxy.main import app, get_anthropic_client, get_local_model_client, get_openai_client
+from llm_proxy.main import app, get_anthropic_client, get_openai_client
 from shared.db.models import ChatSession, UserUsageCounter, UserUsageLimit
 
 _PERIOD_START = date.today().replace(day=1)
@@ -49,44 +49,6 @@ def _sse_body(text: str, input_tokens: int, output_tokens: int, model: str) -> b
 
 def _mock_anthropic_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://mock-anthropic.test")
-
-
-def _openai_sse_body(text: str, prompt_tokens: int, completion_tokens: int, model: str) -> bytes:
-    chunks: list[dict] = [
-        {
-            "id": "chatcmpl_1",
-            "object": "chat.completion.chunk",
-            "created": 1,
-            "model": model,
-            "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-        },
-        {
-            "id": "chatcmpl_1",
-            "object": "chat.completion.chunk",
-            "created": 1,
-            "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-        },
-        {
-            "id": "chatcmpl_1",
-            "object": "chat.completion.chunk",
-            "created": 1,
-            "model": model,
-            "choices": [],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            },
-        },
-    ]
-    lines: list[str] = []
-    for chunk in chunks:
-        lines.append(f"data: {json.dumps(chunk)}")
-        lines.append("")
-    lines.append("data: [DONE]")
-    lines.append("")
-    return ("\n".join(lines) + "\n").encode()
 
 
 def _responses_event(event_type: str, sequence_number: int, **fields: object) -> dict:
@@ -306,36 +268,6 @@ async def test_create_message_routes_non_claude_model_through_openai_responses_b
     assert counter.spent_usd == expected
 
 
-async def test_create_message_routes_local_model_alias_through_openai_backend(
-    client: AsyncClient, db_session: AsyncSession, seed_user: uuid.UUID
-) -> None:
-    session_id = uuid.uuid4()
-    db_session.add(ChatSession(id=session_id, user_id=seed_user))
-    await db_session.flush()
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(
-            200,
-            content=_openai_sse_body("Hi from local model!", 5, 2, settings.local_model_id),
-            headers={"content-type": "text/event-stream"},
-        )
-
-    app.dependency_overrides[get_local_model_client] = lambda: _mock_openai_client(handler)
-
-    response = await client.post(
-        "/v1/messages",
-        headers=_auth_headers(seed_user, session_id),
-        json={
-            "model": "local-model",
-            "max_tokens": 100,
-            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-        },
-    )
-
-    assert response.status_code == 200
-    assert "Hi from local model!" in response.text
-
-
 _WEATHER_TOOL = {
     "name": "get_weather",
     "description": "Current weather for a city",
@@ -507,40 +439,6 @@ async def test_create_message_forwards_openai_failure_as_error_event(
     assert error["error"]["message"] == "The model crashed"
 
 
-async def test_create_message_with_tools_keeps_local_model_request_untouched(
-    client: AsyncClient, db_session: AsyncSession, seed_user: uuid.UUID
-) -> None:
-    session_id = uuid.uuid4()
-    db_session.add(ChatSession(id=session_id, user_id=seed_user))
-    await db_session.flush()
-
-    sent: dict = {}
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        sent.update(json.loads(request.content))
-        return httpx2.Response(
-            200,
-            content=_openai_sse_body("Hi from local model!", 5, 2, settings.local_model_id),
-            headers={"content-type": "text/event-stream"},
-        )
-
-    app.dependency_overrides[get_local_model_client] = lambda: _mock_openai_client(handler)
-
-    response = await client.post(
-        "/v1/messages",
-        headers=_auth_headers(seed_user, session_id),
-        json={
-            "model": "local-model",
-            "max_tokens": 100,
-            "tools": [_WEATHER_TOOL],
-            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-        },
-    )
-
-    assert response.status_code == 200
-    assert "reasoning_effort" not in sent
-
-
 async def test_create_message_maps_effort_to_openai_reasoning(
     client: AsyncClient, db_session: AsyncSession, seed_user: uuid.UUID
 ) -> None:
@@ -576,45 +474,11 @@ async def test_create_message_maps_effort_to_openai_reasoning(
     assert "output_config" not in sent
 
 
-async def test_create_message_maps_effort_to_chat_completions_reasoning_effort(
-    client: AsyncClient, db_session: AsyncSession, seed_user: uuid.UUID
-) -> None:
-    session_id = uuid.uuid4()
-    db_session.add(ChatSession(id=session_id, user_id=seed_user))
-    await db_session.flush()
-
-    sent: dict = {}
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        sent.update(json.loads(request.content))
-        return httpx2.Response(
-            200,
-            content=_openai_sse_body("Hi from local model!", 5, 2, settings.local_model_id),
-            headers={"content-type": "text/event-stream"},
-        )
-
-    app.dependency_overrides[get_local_model_client] = lambda: _mock_openai_client(handler)
-
-    response = await client.post(
-        "/v1/messages",
-        headers=_auth_headers(seed_user, session_id),
-        json={
-            "model": "local-model",
-            "max_tokens": 100,
-            "output_config": {"effort": "low"},
-            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-        },
-    )
-
-    assert response.status_code == 200
-    assert sent["reasoning_effort"] == "low"
-
-
 async def test_create_message_returns_503_when_openai_backend_not_configured(
     client: AsyncClient, seed_user: uuid.UUID
 ) -> None:
-    # Default fixture state: get_openai_client/get_local_model_client resolve to None, matching
-    # a deployment with no OPENAI_API_KEY / LOCAL_MODEL_BASE_URL configured.
+    # Default fixture state: get_openai_client resolves to None, matching a deployment with no
+    # OPENAI_API_KEY configured.
     response = await client.post(
         "/v1/messages",
         headers=_auth_headers(seed_user, uuid.uuid4()),

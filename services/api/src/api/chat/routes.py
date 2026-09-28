@@ -6,10 +6,10 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.chat.catalog import ModelCatalogUnavailableError, fetch_models
 from api.chat.history import build_llm_messages
-from api.chat.schemas import CreateMessageRequest, MessageOut, ModelOut, ModelsOut, SessionOut, SessionUsageOut
+from api.chat.schemas import CreateMessageRequest, MessageOut, ModelsOut, SessionOut, SessionUsageOut
 from api.chat.streaming import SessionTaskManager, run_generation, stream_queue
-from api.config import settings
 from api.db.session import get_db
 from api.deps import get_current_user
 from api.db.models.user import User
@@ -39,13 +39,19 @@ async def _get_owned_session(session_id: uuid.UUID, user: User, db: AsyncSession
     return session
 
 
+async def _available_models(client: httpx.AsyncClient) -> ModelsOut:
+    try:
+        return await fetch_models(client)
+    except ModelCatalogUnavailableError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
 @models_router.get("", response_model=ModelsOut)
-async def list_models(user: User = Depends(get_current_user)) -> ModelsOut:
-    models = [
-        ModelOut(id=model, reasoning_efforts=settings.reasoning_efforts_for(model))
-        for model in settings.available_chat_models
-    ]
-    return ModelsOut(models=models, default=settings.chat_model)
+async def list_models(
+    user: User = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_llm_proxy_client),
+) -> ModelsOut:
+    return await _available_models(client)
 
 
 @router.post("", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
@@ -116,11 +122,13 @@ async def post_message(
     tools: ToolRegistry = Depends(get_tool_registry),
 ) -> StreamingResponse:
     session = await _get_owned_session(session_id, user, db)
-    model = payload.model or settings.chat_model
-    if model not in settings.available_chat_models:
+    available = await _available_models(client)
+    model = payload.model or available.default
+    offered = next((option for option in available.models if option.id == model), None)
+    if offered is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown model: {model}")
     effort = payload.reasoning_effort
-    if effort is not None and effort not in settings.reasoning_efforts_for(model):
+    if effort is not None and effort not in offered.reasoning_efforts:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, f"Reasoning effort {effort!r} is not supported by {model}"
         )

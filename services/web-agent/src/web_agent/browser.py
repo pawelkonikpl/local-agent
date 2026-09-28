@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
-from playwright.async_api import Browser, BrowserContext, CDPSession, Playwright, ProxySettings, async_playwright
+from playwright.async_api import Browser, BrowserContext, CDPSession, Page, Playwright, ProxySettings, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ class BlockedRequest:
 
 
 class BrowserSession:
-    """One page in its own clean `BrowserContext`, with the CDP domains the Solver senses through.
+    """One page, with the CDP domains the Solver senses through.
 
     Every request the page makes -- navigations, redirects, iframes, scripts -- is paused by the
     `Fetch` domain and let through only if its origin is in `allowed_origins` (Agent Origin Sets:
@@ -74,6 +74,12 @@ class BrowserSession:
         self._allowed_origins = allowed_origins
         self._document_status: dict[str, int] = {}
         self._loaded = asyncio.Event()
+        # Load events of the main frame so far, and how many there were when `navigate` finished:
+        # a later one means the page reloaded itself.
+        self._load_count = 0
+        self._loads_after_navigate = 0
+        self._main_frame_id = ""
+        self._main_document_status: int | None = None
         # Handlers of paused requests, kept referenced until done so they aren't garbage-collected.
         self._fetch_tasks: set[asyncio.Task] = set()
         self._blocked: list[BlockedRequest] = []
@@ -81,17 +87,18 @@ class BrowserSession:
         # lifetime, so a caller holding it sees later refusals too.
         self.blocked_requests: list[str] = []
         self.console_errors: list[str] = []
+        # Set by `keep_open_for_human`; honored only by a manager reusing the default context.
+        self.kept_open = False
 
     @classmethod
     async def open(
-        cls, context: BrowserContext, *, navigation_timeout_s: float, allowed_origins: frozenset[str]
+        cls, page: Page, *, navigation_timeout_s: float, allowed_origins: frozenset[str]
     ) -> "BrowserSession":
-        page = await context.new_page()
-        cdp = await context.new_cdp_session(page)
+        cdp = await page.context.new_cdp_session(page)
         session = cls(cdp, navigation_timeout_s=navigation_timeout_s, allowed_origins=allowed_origins)
         cdp.on("Fetch.requestPaused", session._on_request_paused)
         cdp.on("Network.responseReceived", session._on_response)
-        cdp.on("Page.loadEventFired", lambda _params: session._loaded.set())
+        cdp.on("Page.loadEventFired", session._on_load)
         cdp.on("Runtime.consoleAPICalled", session._on_console)
         cdp.on("Runtime.exceptionThrown", session._on_exception)
         await session._send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
@@ -108,6 +115,7 @@ class BrowserSession:
         try:
             async with asyncio.timeout(self._navigation_timeout_s):
                 result = await self._send("Page.navigate", {"url": url})
+                self._main_frame_id = result.get("frameId", "")
                 self._raise_if_navigation_blocked(result.get("frameId", ""), blocked_before)
                 if result.get("errorText"):
                     raise BrowserError(f"Navigation failed: {result['errorText']}")
@@ -116,7 +124,22 @@ class BrowserSession:
             raise BrowserError(f"Navigation timed out after {self._navigation_timeout_s:g}s") from None
         # A redirect to a refused origin can surface only after the navigation itself started.
         self._raise_if_navigation_blocked(result.get("frameId", ""), blocked_before)
+        self._loads_after_navigate = self._load_count
         return NavigationOutcome(url=url, status=self._document_status.get(result.get("loaderId", "")))
+
+    async def wait_for_reload(self, timeout_s: float) -> NavigationOutcome | None:
+        """Wait up to `timeout_s` for the page to load again on its own after `navigate` (e.g. a
+        bot check reloading once passed); its outcome, or None if it didn't reload in time."""
+        try:
+            async with asyncio.timeout(timeout_s):
+                while self._load_count <= self._loads_after_navigate:
+                    self._loaded.clear()
+                    await self._loaded.wait()
+        except TimeoutError:
+            return None
+        self._loads_after_navigate = self._load_count
+        url = await self.evaluate("location.href") or ""
+        return NavigationOutcome(url=url, status=self._main_document_status)
 
     def _raise_if_navigation_blocked(self, frame_id: str, since: int) -> None:
         for blocked in self._blocked[since:]:
@@ -136,6 +159,18 @@ class BrowserSession:
 
     async def text_content(self) -> str:
         return await self.evaluate("document.body ? document.body.innerText : ''") or ""
+
+    async def html(self) -> str:
+        """The page's current markup (`outerHTML`), e.g. to save it as a test fixture."""
+        return await self.evaluate("document.documentElement.outerHTML") or ""
+
+    def keep_open_for_human(self) -> None:
+        """Leave this tab open when the session ends, for a person to solve a bot check in it.
+
+        The origin filter stays attached while this process runs. The agent itself never touches
+        the challenge.
+        """
+        self.kept_open = True
 
     async def screenshot(self) -> bytes:
         result = await self._send("Page.captureScreenshot", {"format": "png"})
@@ -170,9 +205,15 @@ class BrowserSession:
             # The page or the context went away while the request was paused; nothing to answer.
             pass
 
+    def _on_load(self, _params: dict) -> None:
+        self._load_count += 1
+        self._loaded.set()
+
     def _on_response(self, params: dict) -> None:
         if params.get("type") == "Document":
             self._document_status[params["loaderId"]] = params["response"]["status"]
+            if params.get("frameId") == self._main_frame_id:
+                self._main_document_status = params["response"]["status"]
 
     def _on_console(self, params: dict) -> None:
         if params.get("type") != "error":
@@ -194,8 +235,11 @@ class BrowserSession:
 class BrowserManager:
     """One browser per process, started lazily and relaunched if it goes away.
 
-    Every `session()` gets a fresh `BrowserContext`: no cookies or storage carry over between
-    searches or users.
+    By default every `session()` gets a fresh `BrowserContext`: no cookies or storage carry over
+    between searches or users. With `reuse_default_context` (only with `cdp_url`, i.e. `site-agent`'s
+    headful Chrome) every session is a new tab in the browser's default context instead,
+    closed afterwards -- unless it was kept open for a person to solve a bot check. At most one such
+    tab is kept per `hold_key`: the next session with that key closes it first.
     """
 
     def __init__(
@@ -206,15 +250,22 @@ class BrowserManager:
         navigation_timeout_s: float,
         proxy_url: str | None = None,
         proxy_bypass: str | None = None,
+        reuse_default_context: bool = False,
     ) -> None:
+        if reuse_default_context and not cdp_url:
+            raise ValueError("reuse_default_context needs cdp_url: only an attached browser has a context to reuse")
         self._cdp_url = cdp_url
         self._headless = headless
         self._proxy_url = proxy_url
         self._proxy_bypass = proxy_bypass
         self._navigation_timeout_s = navigation_timeout_s
+        self._reuse_default_context = reuse_default_context
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._lock = asyncio.Lock()
+        # hold_key -> the tab left open with a bot check for a person to solve.
+        self._held_pages: dict[str, Page] = {}
+        # Sessions currently open (a context each, or a tab each when reusing the default context).
         self.open_contexts = 0
 
     async def start(self) -> None:
@@ -223,30 +274,71 @@ class BrowserManager:
     async def close(self) -> None:
         async with self._lock:
             if self._browser is not None:
+                # For an attached browser this only disconnects; that Chrome keeps running.
                 await self._browser.close()
                 self._browser = None
             if self._playwright is not None:
                 await self._playwright.stop()
                 self._playwright = None
+            self._held_pages.clear()
 
     @asynccontextmanager
-    async def session(self, *, allowed_origins: frozenset[str]) -> AsyncGenerator[BrowserSession]:
+    async def session(
+        self, *, allowed_origins: frozenset[str], hold_key: str | None = None
+    ) -> AsyncGenerator[BrowserSession]:
         browser = await self._ensure_browser()
-        try:
-            context = await browser.new_context()
-        except PlaywrightError as exc:
-            raise BrowserError(f"Could not open a browser context: {exc.message}") from exc
+        if self._reuse_default_context:
+            await self._close_held_page(hold_key)
+            context = self._default_context(browser)
+        else:
+            context = await self._new_context(browser)
         self.open_contexts += 1
+        page: Page | None = None
+        session: BrowserSession | None = None
         try:
-            yield await BrowserSession.open(
-                context, navigation_timeout_s=self._navigation_timeout_s, allowed_origins=allowed_origins
-            )
+            try:
+                page = await context.new_page()
+                session = await BrowserSession.open(
+                    page, navigation_timeout_s=self._navigation_timeout_s, allowed_origins=allowed_origins
+                )
+            except PlaywrightError as exc:
+                raise BrowserError(f"Could not open a browser tab: {exc.message}") from exc
+            yield session
         finally:
             self.open_contexts -= 1
-            try:
-                await context.close()
-            except PlaywrightError:
-                logger.warning("Closing a browser context failed", exc_info=True)
+            if not self._reuse_default_context:
+                await self._close_quietly(context)
+            elif page is not None and session is not None and session.kept_open and hold_key is not None:
+                # Two concurrent searches may both hit the check; keep only the newer tab.
+                await self._close_held_page(hold_key)
+                self._held_pages[hold_key] = page
+            elif page is not None:
+                await self._close_quietly(page)
+
+    async def _new_context(self, browser: Browser) -> BrowserContext:
+        try:
+            return await browser.new_context()
+        except PlaywrightError as exc:
+            raise BrowserError(f"Could not open a browser context: {exc.message}") from exc
+
+    @staticmethod
+    def _default_context(browser: Browser) -> BrowserContext:
+        if not browser.contexts:
+            raise BrowserError("The attached browser has no default context to open a tab in")
+        return browser.contexts[0]
+
+    async def _close_held_page(self, hold_key: str | None) -> None:
+        """Close the tab still waiting for a person on `hold_key`'s site: they didn't solve it."""
+        page = self._held_pages.pop(hold_key, None) if hold_key is not None else None
+        if page is not None and not page.is_closed():
+            await self._close_quietly(page)
+
+    @staticmethod
+    async def _close_quietly(target: Page | BrowserContext) -> None:
+        try:
+            await target.close()
+        except PlaywrightError:
+            logger.warning("Closing a browser %s failed", type(target).__name__, exc_info=True)
 
     def _proxy(self) -> ProxySettings | None:
         """The egress proxy every request goes through, except hosts in `proxy_bypass`."""
@@ -261,6 +353,8 @@ class BrowserManager:
         async with self._lock:
             if self._browser is not None and self._browser.is_connected():
                 return self._browser
+            # Tabs of a browser that went away can't be closed or reused.
+            self._held_pages.clear()
             if self._playwright is None:
                 self._playwright = await async_playwright().start()
             try:

@@ -11,31 +11,9 @@ class Settings(BaseSettings):
 
     llm_proxy_url: str
     internal_proxy_token: str
+    # The default of the chat's model picker, when llm-proxy's providers list it. The models on
+    # offer, and the reasoning levels of each, come from the providers (llm-proxy `GET /v1/models`).
     chat_model: str = "claude-sonnet-5"
-    # Models a user may pick per message; llm-proxy routes each by name (see its `_resolve_backend`).
-    # `chat_model` is the default and is always offered, even if missing here. The `gpt-*` ones
-    # need OPENAI_API_KEY set on llm-proxy (otherwise it answers 503); override with CHAT_MODELS.
-    chat_models: list[str] = [
-        "claude-sonnet-5",
-        "claude-opus-5-5",
-        "claude-haiku-4-5-20251001",
-        "gpt-6-sol",
-        "gpt-6-astra",
-        "gpt-6-luna",
-        "local-model",
-    ]
-    # Reasoning levels a user may pick per model, in Anthropic's `output_config.effort` vocabulary
-    # (llm-proxy maps it onto OpenAI's `reasoning.effort`). A model missing here offers no choice
-    # and runs at its provider's default. Only list levels the provider accepts for that model --
-    # Haiku 4.5 takes a token budget rather than an effort level, so it has none. Override with
-    # CHAT_MODEL_REASONING_EFFORTS (JSON).
-    chat_model_reasoning_efforts: dict[str, list[str]] = {
-        "claude-sonnet-5": ["low", "medium", "high", "xhigh", "max"],
-        "claude-opus-5-5": ["low", "medium", "high", "xhigh", "max"],
-        "gpt-6-sol": ["low", "medium", "high"],
-        "gpt-6-astra": ["low", "medium", "high"],
-        "gpt-6-luna": ["low", "medium", "high"],
-    }
     chat_max_tokens: int = 4096
 
     chat_tools_enabled: bool = True
@@ -47,13 +25,13 @@ class Settings(BaseSettings):
     # timeout (25s) sits below this, which sits below `tool_timeout_s`.
     web_agent_url: str | None = None
     web_search_timeout_s: float = 28
-
-    @property
-    def available_chat_models(self) -> list[str]:
-        return [self.chat_model, *(model for model in self.chat_models if model != self.chat_model)]
-
-    def reasoning_efforts_for(self, model: str) -> list[str]:
-        return self.chat_model_reasoning_efforts.get(model, [])
+    # The web-agent instance behind `site_search` (compose: `site-agent`, a headful Chrome in a
+    # container); unset, or no sites, = the tool isn't offered. Sites must be names web-agent knows
+    # (its `/v1/sites`); override with WEB_AGENT_SITES (JSON).
+    web_agent_sites_url: str | None = None
+    web_agent_sites: list[str] = ["allegro.pl"]
+    # Where the user sees that browser's screen (compose: `site-vnc`) to solve a bot check.
+    site_browser_view_url: str = "http://localhost:6080/vnc.html?autoconnect=1&resize=scale"
 
     @property
     def cookie_secure(self) -> bool:

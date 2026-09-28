@@ -7,19 +7,22 @@ import httpx
 import openai
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_proxy import metering
 from llm_proxy.backends.anthropic_backend import AnthropicBackend, build_anthropic_client
-from llm_proxy.backends.base import LLMBackend, UpstreamError
-from llm_proxy.backends.openai_backend import OpenAIBackend
+from llm_proxy.backends.base import LLMBackend, ModelInfo, UpstreamError
 from llm_proxy.backends.openai_responses_backend import OpenAIResponsesBackend
 from llm_proxy.config import settings
 from llm_proxy.db import engine, get_db
+from llm_proxy.model_catalog import ModelCatalog
 from llm_proxy.usage import UsageAccumulator
 
-LOCAL_MODEL_ALIAS = "local-model"
+
+class ModelsResponse(BaseModel):
+    models: list[ModelInfo]
 
 
 async def get_anthropic_client(request: Request) -> httpx.AsyncClient:
@@ -30,8 +33,8 @@ async def get_openai_client(request: Request) -> openai.AsyncOpenAI | None:
     return request.app.state.openai_client
 
 
-async def get_local_model_client(request: Request) -> openai.AsyncOpenAI | None:
-    return request.app.state.local_model_client
+async def get_model_catalog(request: Request) -> ModelCatalog:
+    return request.app.state.model_catalog
 
 
 @asynccontextmanager
@@ -39,25 +42,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
     app.state.anthropic_client = build_anthropic_client(settings.anthropic_base_url)
-    # Both optional providers stay None unless explicitly configured -- constructing
-    # openai.AsyncOpenAI with no api_key raises at startup, so an unconfigured provider must
-    # never be instantiated just because the dependency is always wired into the route.
+    # OpenAI stays None unless explicitly configured -- constructing openai.AsyncOpenAI with no
+    # api_key raises at startup, so an unconfigured provider must never be instantiated just
+    # because the dependency is always wired into the route.
     app.state.openai_client = (
         openai.AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
         if settings.openai_api_key
         else None
     )
-    app.state.local_model_client = (
-        openai.AsyncOpenAI(api_key=settings.internal_proxy_token, base_url=settings.local_model_base_url)
-        if settings.local_model_base_url
-        else None
-    )
+    app.state.model_catalog = ModelCatalog(settings.models_cache_ttl_s)
     yield
     await app.state.anthropic_client.aclose()
     if app.state.openai_client is not None:
         await app.state.openai_client.close()
-    if app.state.local_model_client is not None:
-        await app.state.local_model_client.close()
 
 
 def _require_internal_auth(request: Request) -> None:
@@ -76,26 +73,53 @@ def _require_uuid_header(request: Request, name: str) -> uuid.UUID:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {name} header") from exc
 
 
+def _openai_backend(client: openai.AsyncOpenAI) -> OpenAIResponsesBackend:
+    return OpenAIResponsesBackend(
+        client,
+        model_pattern=settings.openai_models_pattern,
+        reasoning_efforts=settings.openai_reasoning_efforts,
+    )
+
+
+def _configured_backends(
+    anthropic_client: httpx.AsyncClient, openai_client: openai.AsyncOpenAI | None
+) -> list[LLMBackend]:
+    backends: list[LLMBackend] = [AnthropicBackend(anthropic_client, settings.anthropic_api_key)]
+    if openai_client is not None:
+        backends.append(_openai_backend(openai_client))
+    return backends
+
+
 def _resolve_backend(
     model: str,
     *,
     anthropic_client: httpx.AsyncClient,
     openai_client: openai.AsyncOpenAI | None,
-    local_model_client: openai.AsyncOpenAI | None,
 ) -> LLMBackend:
     if model.startswith("claude-"):
         return AnthropicBackend(anthropic_client, settings.anthropic_api_key)
-    if model == LOCAL_MODEL_ALIAS:
-        if local_model_client is None:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "local-model backend is not configured")
-        return OpenAIBackend(local_model_client, settings.local_model_id)
     if openai_client is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OpenAI backend is not configured")
-    return OpenAIResponsesBackend(openai_client, model)
+    return _openai_backend(openai_client)
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="local-agent llm-proxy", lifespan=lifespan)
+
+    @app.get("/v1/models", response_model=ModelsResponse)
+    async def list_models(
+        request: Request,
+        catalog: ModelCatalog = Depends(get_model_catalog),
+        anthropic_client: httpx.AsyncClient = Depends(get_anthropic_client),
+        openai_client: openai.AsyncOpenAI | None = Depends(get_openai_client),
+    ) -> ModelsResponse:
+        """What every configured provider serves right now -- api's model picker and its check
+        of a requested model both read this, so neither side keeps its own list."""
+        _require_internal_auth(request)
+        models = await catalog.models(_configured_backends(anthropic_client, openai_client))
+        if not models:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "No provider could list its models")
+        return ModelsResponse(models=models)
 
     @app.post("/v1/messages")
     async def create_message(
@@ -103,7 +127,6 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db),
         anthropic_client: httpx.AsyncClient = Depends(get_anthropic_client),
         openai_client: openai.AsyncOpenAI | None = Depends(get_openai_client),
-        local_model_client: openai.AsyncOpenAI | None = Depends(get_local_model_client),
     ) -> StreamingResponse:
         _require_internal_auth(request)
         user_id = _require_uuid_header(request, "x-local-agent-user-id")
@@ -119,7 +142,6 @@ def create_app() -> FastAPI:
             payload.get("model", ""),
             anthropic_client=anthropic_client,
             openai_client=openai_client,
-            local_model_client=local_model_client,
         )
         usage = UsageAccumulator(fallback_model=payload.get("model", "unknown"))
         upstream = backend.stream(payload, usage)

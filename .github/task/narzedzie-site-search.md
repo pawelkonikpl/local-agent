@@ -17,6 +17,8 @@ Założenia, które wynikają z `warstwa-bezpieczenstwa-web-agent.md` (to zadani
 
 **Decyzja po sprawdzeniu (28.09.2026):** Allegro chroni listing przez DataDome. Z kontenera w chmurze zarówno `curl`, jak i headless Chromium dostają 403 ze stroną wyzwania z `captcha-delivery.com` i zero ofert. Użytkownik wybrał wariant **z własną przeglądarką na hoście**: prawdziwy Chrome, widoczne okno, domowe łącze, osobny profil bez zalogowanych sesji. Serwis `site_search` obsługuje osobna instancja web-agent uruchomiona na hoście i podłączona do tego Chrome przez CDP. `web_search` bez zmian zostaje w kontenerze (headless, SearXNG).
 
+**Zmiana decyzji po prototypie (28.09.2026, zastępuje wariant z hostem):** prawdziwy Google Chrome **z oknem na wirtualnym ekranie (Xvfb) w kontenerze podmana** na komputerze użytkownika, uruchomiony przez nas z `--remote-debugging-port` (nie przez Playwright, więc bez flag automatyzacji), dostaje listing Allegro. Prototyp: 10/10 ofert z ceną w 4–5 s. Pierwsze 1–3 zapytania na świeżym profilu dostają 403 ze stroną DataDome, ale to **niewidoczny test urządzenia** (`ct.captcha-delivery.com/i.js`), nie captcha: wykonuje się sam w przeglądarce i ustawia ciasteczko. Z hosta `curl` dostaje 403, więc samo domowe IP nie wystarcza; potrzebna jest prawdziwa przeglądarka. Wariant z hostem odpada, bo: wymaga `0.0.0.0` + firewalla (kontener nie dosięga `127.0.0.1` hosta w podman machine na macOS — sprawdzone), dwóch ręcznie uruchamianych skryptów i przeglądarki poza izolacją kontenera. Sekcja „Przeglądarka w kontenerze `site-agent`” niżej zastępuje „Przeglądarkę na hoście”.
+
 Kod, na którym to stoi:
 - `SearchEngine` (`web_agent/engines/base.py`): `name`, `extract_js`, `url_for`, `parse`, `detect_block`, `is_no_results`. Serwis to po prostu kolejna implementacja tego Protocolu, więc `SearchService.search` (Sense-Act-Verify, rate-limit, timeout, audyt) działa bez zmian.
 - `build_results` (`engines/common.py`) odrzuca reklamy (`is_ad`). W sklepie oferty sponsorowane są prawdziwymi ofertami, więc tu je oznaczamy, a nie wyrzucamy.
@@ -24,51 +26,33 @@ Kod, na którym to stoi:
 
 ## Zakres
 
-### Przeglądarka na hoście (wariant wybrany przez użytkownika)
+### Przeglądarka w kontenerze `site-agent`
 
 Układ:
 ```
-api (kontener) --HTTP+bearer--> web-agent "sites" (host, uv run) --CDP 127.0.0.1:9222--> Chrome (host, osobny profil)
-                                                                                           |
-                                                                    --proxy-server--> egress-proxy (kontener, port 127.0.0.1:3128)
+api --HTTP+bearer (sieć sites)--> site-agent: web-agent (sites_only) --CDP 127.0.0.1:9222--> Google Chrome (Xvfb, ten sam kontener)
+                                                                                                  |
+                                                                          --proxy-server--> egress-proxy (sieć sites)
+człowiek --http://localhost:6080--> site-vnc (noVNC) --VNC (sieć sites)--> x11vnc w site-agent
 ```
 
-A. **Chrome użytkownika — osobny, dedykowany profil.** Skrypt `scripts/site-browser.sh` (Linux/macOS; ścieżkę do Chrome'a da się nadpisać zmienną `CHROME`) uruchamia:
-   ```
-   "$CHROME" --user-data-dir="$HOME/.local-agent/site-browser" \
-     --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 \
-     --proxy-server=http://127.0.0.1:3128 \
-     --no-first-run --no-default-browser-check about:blank
-   ```
-   - **Nigdy główny profil** użytkownika. CDP daje pełną kontrolę nad przeglądarką, a zalogowane sesje (poczta, bank) w tym samym profilu byłyby w zasięgu agenta. Nowsze Chrome i tak nie włączają zdalnego debugowania na domyślnym profilu.
-   - W tym profilu **nie logujemy się** do Allegro ani nigdzie indziej (zasada 5 dokumentu: bez zalogowanych sesji, gdy zadanie ich nie wymaga). Opisane w nagłówku skryptu i w README.
-   - Port CDP tylko na `127.0.0.1`.
-   - Ruch Chrome'a idzie przez `egress-proxy`, więc lista dozwolonych domen działa także tutaj. `podman-compose.yml`: `egress-proxy` publikuje `127.0.0.1:3128:3128`. To działa, bo `egress-proxy` jest też w sieci `egress` (z NAT). Na hoście port jest dostępny tylko lokalnie.
-
-B. **Druga instancja web-agent na hoście** (`uv run uvicorn web_agent.main:app --port 8093` z `WEB_AGENT_CDP_URL=http://127.0.0.1:9222` i `WEB_AGENT_SITES_ONLY=true`):
-   - `sites_only=true` → `POST /v1/search` odpowiada 404. Ta instancja obsługuje tylko `/v1/site-search` i `/v1/sites`, a kontenerowa odwrotnie: `sites_enabled` domyślnie `false`, więc `/v1/site-search` → 404. Wyszukiwanie w SearXNG nie trafia do przeglądarki użytkownika, a Allegro nie trafia do headless.
-   - `api` w compose łączy się pod `WEB_AGENT_SITES_URL` (domyślnie `http://host.containers.internal:8093`) z bearerem `INTERNAL_PROXY_TOKEN`. Instancja na hoście musi słuchać na interfejsie osiągalnym z kontenera. **Zweryfikować na starcie implementacji**, czy przy rootless podman (pasta) wystarcza `127.0.0.1`. Jeśli trzeba `0.0.0.0`, opisać w README, że port 8093 ma być zablokowany na firewallu dla sieci LAN (token i tak jest wymagany).
-   - Skrypt `scripts/site-agent.sh` uruchamia tę instancję z właściwymi zmiennymi.
-
-C. **Kontekst przeglądarki przy CDP do Chrome'a użytkownika.** `BrowserManager` dostaje tryb `reuse_default_context` (włączany razem z `cdp_url` w instancji sites):
-   - każde wyszukiwanie to **nowa karta** w domyślnym kontekście profilu (`browser.contexts[0].new_page()`), zamykana w `finally`, a nie nowy `BrowserContext`;
-   - powód: DataDome i podobne systemy wydają ciasteczko po przejściu weryfikacji. Czysty kontekst przy każdym zapytaniu oznaczałby wyzwanie przy każdym zapytaniu. Ciasteczka zostają tylko w dedykowanym profilu bez logowań, więc trwały stan nie zawiera danych użytkownika;
-   - filtr originów przez CDP `Fetch` (plan bezpieczeństwa, pkt 6) działa bez zmian, bo sesja CDP jest per karta.
-
-D. **Blokada = przekazanie człowiekowi.** Gdy `detect_block` wykryje wyzwanie, karta **nie jest zamykana** (w trybie `reuse_default_context`), a odpowiedź to `status="blocked"` z `error` np. `"allegro.pl asks for human verification; solve it in the site browser window and retry"`. `SiteSearchTool` w `api` formatuje to tak, żeby model poprosił użytkownika o rozwiązanie weryfikacji w oknie przeglądarki i ponowienie prośby. Agent nigdy nie klika w wyzwanie sam.
-   - Wymaga poszerzenia zbioru originów o domenę wyzwania (`geo.captcha-delivery.com` lub inną, ustaloną z prawdziwej strony) **tylko** dla ramek wyzwania, żeby człowiek mógł je rozwiązać. Najprościej: dopisać ją do `extra_origins` Allegro i do listy proxy. Treść tej ramki nigdy nie trafia do modelu (`extract_js` czyta tylko listing).
-   - Otwarte karty z wyzwaniem nie mogą się mnożyć: przed otwarciem nowej karty web-agent zamyka poprzednią kartę z wyzwaniem dla tego serwisu, jeśli użytkownik jej nie rozwiązał.
-
-E. **Fixture'y z prawdziwej strony.** Z chmury nie da się pobrać listingu, więc selektory ustala się na stronach zapisanych przez użytkownika:
-   - CLI dostaje flagę `--save-html PATH` (dla `search` i `site`): po nawigacji zapisuje `document.documentElement.outerHTML` przez `Runtime.evaluate`;
-   - użytkownik uruchamia `scripts/site-browser.sh`, potem `uv run web-agent site allegro.pl "rower gravel" --cdp-url http://127.0.0.1:9222 --save-html allegro_results.html`, i analogicznie dla zapytania bez wyników i dla strony wyzwania (jeśli się pojawi). Pliki trafiają do `services/web-agent/tests/fixtures/`;
-   - **implementacja ma dwie fazy**: (1) wszystko poza selektorami Allegro (tryb sites, CLI z `--save-html`, skrypty, `api`, szkielet `AllegroSite` z selektorami do uzupełnienia); (2) selektory, `detect_block`, `is_no_results` i testy na fixture'ach, gdy użytkownik je dostarczy. Faza 1 może być zmergowana bez fazy 2 tylko z `web_agent_sites` pustym w `api`, żeby narzędzie nie było oferowane.
+A. **`deploy/Containerfile.site-agent`**: `python:3.12-slim` + `google-chrome-stable` (tylko amd64; podman machine użytkownika jest amd64) + `xvfb` + `x11vnc`, web-agent jak w `Containerfile.web-agent`, ale bez przeglądarek Playwrighta (`connect_over_cdp` ich nie potrzebuje). `deploy/site-agent/entrypoint.sh` uruchamia Xvfb, x11vnc, Chrome i uvicorn; gdy którykolwiek proces padnie, kontener kończy się (compose: `restart: unless-stopped`).
+   - Chrome: `--user-data-dir=/tmp/chrome-profile` (tmpfs: profil ginie przy restarcie, więc brak trwałego stanu; ciasteczko DataDome zdobywa się od nowa przez pkt F), `--remote-debugging-port=9222` (Chrome słucha wtedy tylko na `127.0.0.1` kontenera), `--proxy-server=http://egress-proxy:3128`, `--no-sandbox` (jak Chromium Playwrighta w `web-agent`: sandbox Chrome'a nie działa w kontenerze bez dodatkowych uprawnień; izolację daje kontener), `--no-first-run --no-default-browser-check`.
+   - Kontener jak `web-agent`: `read_only`, `tmpfs /tmp`, `cap_drop: ALL`, `no-new-privileges`, użytkownik 10001, limity pamięci/CPU.
+   - Żadnych logowań w tym profilu; nikt poza agentem i człowiekiem przez noVNC z niego nie korzysta.
+B. **Sieci**: nowa sieć `sites` (`internal: true`) dla `site-agent`, `api`, `egress-proxy` i `site-vnc`. `site-agent` **nie** jest w sieci `web`, więc headless `web-agent` (czytający dowolne strony) nie dosięga ani CDP, ani VNC tej przeglądarki. `api` łączy się pod `WEB_AGENT_SITES_URL` (domyślnie `http://site-agent:8080`).
+C. **Kontekst przeglądarki**: tryb `reuse_default_context` jak w fazie 1 (nowa karta w domyślnym kontekście profilu, zamykana w `finally`). Filtr originów przez CDP `Fetch` działa bez zmian.
+D. **Blokada = przekazanie człowiekowi** (dla prawdziwej captchy, gdy pkt F nie wystarczy): karta zostaje otwarta (najwyżej jedna na serwis), `SiteSearchTool` prosi model, żeby poprosił użytkownika o rozwiązanie weryfikacji na ekranie przeglądarki pod `http://localhost:6080` i o ponowienie prośby. Agent nigdy nie klika w wyzwanie sam.
+E. **`site-vnc`** (`deploy/Containerfile.site-vnc`: `debian:trixie-slim` + `novnc` + `websockify`): `websockify --web /usr/share/novnc 6080 site-agent:5900`, port `127.0.0.1:6080:6080`. Opublikowany port wymaga sieci z wyjściem, więc `site-vnc` jest też w osobnej sieci `site-vnc-out` (nie-internal); nic poza nim w niej nie ma. x11vnc bez hasła, ale osiągalny tylko z sieci `sites` (api, egress-proxy, site-vnc).
+F. **Niewidoczny test anty-botowy**: serwis deklaruje `block_settle_s` (Allegro: 10 s; DuckDuckGo, SearXNG: 0). Gdy `detect_block` zgłosi blokadę, `SearchService` czeka do `block_settle_s` na ponowne załadowanie strony przez nią samą (strona testu przeładowuje się po zaliczeniu, jak u zwykłego użytkownika) i sprawdza blokadę jeszcze raz na nowym dokumencie. Bez ponownego załadowania albo z blokadą po nim: `blocked` jak w pkt D. To nie jest obchodzenie zabezpieczeń: nic nie klikamy, niczego nie podrabiamy, strona sama ocenia przeglądarkę. Jedna nawigacja od nas, zero ponowień.
+G. **Fixture'y**: `web-agent site ... --save-html` (CLI) — tak zapisano `raspberry_pi_5.html` w prototypie; selektory w `sites/allegro.py` ustalone na nim.
 
 ### web-agent
 
 1. **Model wyniku (`models.py`)**:
    - `SearchResult` dostaje `price: str | None = None` (tekst ceny tak, jak pokazuje strona, po normalizacji whitespace, np. `"1 299,00 zł"`; bez parsowania na liczbę, bo formaty są różne).
-   - Nowy `SiteSearchQuery`: `site: str`, `query` (jak w `SearchQuery`: 1–400 znaków po `strip()`), `max_results: int = 5` (1–10). Bez `region`.
+   - Nowy `SiteSearchQuery`: `site: str`, `query` (jak w `SearchQuery`: 1–400 znaków po `strip()`), `max_results: int = 5` (1–10), `sort` (niżej). Bez `region`.
+   - `SearchQuery` i `SiteSearchQuery` dostają `sort: Literal["relevance", "price_asc", "price_desc"] = "relevance"`. Silniki web (DuckDuckGo, SearXNG) go ignorują; serwis mapuje go w `url_for` (Allegro: `order=p` / `order=pd`, dla `relevance` bez parametru).
 2. **Wspólne (`engines/common.py`)**:
    - `extract_js` dostaje opcjonalny selektor `price` (zwraca wtedy też `price` w wierszu).
    - `build_results(..., ads: Literal["drop", "flag"] = "drop")`. `"flag"` zostawia wpis z flagą `sponsored` w `flags`. Istniejące silniki wołają z domyślnym `"drop"`, więc ich zachowanie się nie zmienia.
@@ -91,28 +75,28 @@ E. **Fixture'y z prawdziwej strony.** Z chmury nie da się pobrać listingu, wi�
    - `GET /v1/sites` → `{"sites": SITE_NAMES}`, z tym samym bearerem.
 5. **CLI (`cli.py`)**: nowa podkomenda `web-agent site <site> "<query>" [--max-results N] [--json] [--headful] [--cdp-url URL] [--screenshot out.png]`. Te same kody wyjścia co `search`. `format_text` dopisuje cenę i `[sponsored]`, gdy są.
 6. **Deploy**:
-   - dopisać domeny Allegro (`allegro.pl`, te z `extra_origins`, domenę wyzwania z pkt D) do `deploy/egress-proxy/allowlist.txt`, z komentarzem `# site_search: allegro.pl`;
-   - `podman-compose.yml`: `egress-proxy` publikuje `127.0.0.1:3128:3128`, `api` dostaje `WEB_AGENT_SITES_URL: ${WEB_AGENT_SITES_URL:-http://host.containers.internal:8093}`;
+   - dopisać domeny Allegro (`allegro.pl`, te z `extra_origins`, domeny DataDome) do `deploy/egress-proxy/allowlist.txt`, z komentarzem `# site_search: allegro.pl`;
+   - `podman-compose.yml`: usługi `site-agent` i `site-vnc`, sieci `sites` i `site-vnc-out` (pkt A–E), `api` w sieci `sites` z `WEB_AGENT_SITES_URL: ${WEB_AGENT_SITES_URL-http://site-agent:8080}`; `egress-proxy` w sieci `sites`, **bez** portu na hoście;
    - konfiguracja web-agent (`config.py`): `sites_only: bool = False`, `sites_enabled: bool = False` (`sites_only` włącza też `sites_enabled`), `reuse_default_context: bool = False`;
-   - `.env.example` i README: krótka instrukcja „site_search przez własną przeglądarkę” (kolejność: `podman-compose up`, `scripts/site-browser.sh`, `scripts/site-agent.sh`) z ostrzeżeniem o dedykowanym profilu i braku logowania.
+   - `.env.example` i README: krótko — `site_search` działa w kontenerze `site-agent`, ekran przeglądarki pod `http://localhost:6080`, tylko amd64. Skrypty hosta (`scripts/site-browser.sh`, `scripts/site-agent.sh`) usunąć.
 
 ### api
 
 7. **`api/tools/site_search.py` → `SiteSearchTool`**:
    - `name = "site_search"`, `capabilities = {"reads_untrusted", "external_effect"}`.
    - `description` (po angielsku): szuka bezpośrednio w wyszukiwarce wskazanego serwisu i zwraca oferty (tytuł, cena, URL); używać zamiast `web_search` z `site:`, gdy serwis jest na liście; ceny są odczytane ze strony i mogą się zmienić.
-   - `input_schema`: `site` jako `enum` z `settings.web_agent_sites` (domyślnie `["allegro.pl"]`), `query` (wymagane), `max_results` 1–10.
+   - `input_schema`: `site` jako `enum` z `settings.web_agent_sites` (domyślnie `["allegro.pl"]`), `query` (wymagane), `max_results` 1–10, `sort` jako `enum` `relevance` / `price_asc` / `price_desc` (domyślnie `relevance`). Opis: dla „najtańszy”, „najtaniej” użyj `price_asc` i konkretnego zapytania (sortowanie po cenie wyciąga też akcesoria).
    - Walidacja jak w `WebSearchTool._validate` (wydzielić wspólne sprawdzanie `query` i `max_results` do małej funkcji w `api/tools/web_common.py`, żeby nie kopiować) + `site` spoza listy → `ToolInputError`.
    - Wynik formatowany tym samym spotlightingiem co `web_search` (wspólna funkcja z planu bezpieczeństwa, pkt 9), z ceną w linii tytułu (`1. <title> — <price>`) i dopiskiem `[sponsored]`. `source="site_search:<site>"`.
-   - Łączy się z `settings.web_agent_sites_url` (instancja na hoście, nie kontenerowy `web_agent_url`). Rejestrowany w `build_default_registry`, gdy `web_agent_sites_url` jest ustawione i lista `web_agent_sites` nie jest pusta.
-   - Brak połączenia (instancja na hoście nie działa) → `ToolResult` z błędem: „The site browser isn't running on the user's computer; ask the user to start it (scripts/site-browser.sh and scripts/site-agent.sh).”
-   - `status="blocked"` → komunikat dla modelu: poproś użytkownika o rozwiązanie weryfikacji w oknie przeglądarki na jego komputerze i o ponowienie prośby; nie ponawiaj sam.
+   - Łączy się z `settings.web_agent_sites_url` (kontener `site-agent`, nie `web_agent_url`). Rejestrowany w `build_default_registry`, gdy `web_agent_sites_url` jest ustawione i lista `web_agent_sites` nie jest pusta.
+   - Brak połączenia (`site-agent` nie działa) → `ToolResult` z błędem: usługa wyszukiwania w sklepach nie działa, poproś użytkownika o `podman-compose up -d site-agent`.
+   - `status="blocked"` → komunikat dla modelu: poproś użytkownika o rozwiązanie weryfikacji na ekranie przeglądarki pod `settings.site_browser_view_url` (domyślnie `http://localhost:6080/vnc.html?autoconnect=1&resize=scale`) i o ponowienie prośby; nie ponawiaj sam.
 8. **Prompt systemowy**: jedno zdanie w `web_rules` (plan bezpieczeństwa, pkt 12): ceny i dane ofert pochodzą ze strony serwisu i przed decyzją o zakupie użytkownik powinien je sprawdzić na stronie oferty. Model nie kupuje i nie wypełnia formularzy (nie ma takich narzędzi).
 
 ## Poza zakresem
 
 - Wchodzenie na stronę pojedynczej oferty (szczegóły, dostępność, sprzedawca). To zadanie dla `web_fetch` albo `site_offer(site, offer_url)` z URL-em walidowanym względem serwisu. Osobny plan.
-- Filtry i sortowanie serwisu (cena od/do, stan, kategoria) w parametrach narzędzia. Łatwe do dodania później jako pola `SiteSearchQuery` mapowane w `url_for`, ale każdy serwis ma inne.
+- Filtry serwisu (cena od/do, stan, kategoria) w parametrach narzędzia. Sortowanie po cenie jest w zakresie (pkt 1); filtry łatwo dodać później tak samo, jako pola `SiteSearchQuery` mapowane w `url_for`.
 - Kolejne serwisy poza Allegro. Konstrukcja ma je umożliwiać bez zmian w kodzie wspólnym.
 - Oficjalne API Allegro (developer.allegro.pl). Warto sprawdzić, czy wyszukiwanie ofert jest dostępne dla naszego typu aplikacji. Jeśli tak, to byłaby osobna implementacja `SearchEngine` bez przeglądarki (stabilniejsza i zgodna z regulaminem), wymagająca rejestracji aplikacji i sekretu w env web-agent.
 - Obchodzenie ochrony anty-botowej, logowanie, koszyk, zakupy.
@@ -120,10 +104,10 @@ E. **Fixture'y z prawdziwej strony.** Z chmury nie da się pobrać listingu, wi�
 
 ## Ryzyka
 
-- **Headless z kontenera: sprawdzone, zablokowane** (patrz „Decyzja” w kontekście). Stąd przeglądarka na hoście.
-- **Czy prawdziwy Chrome z domowego łącza przechodzi?** Nie wiadomo, dopóki użytkownik nie sprawdzi. Pierwszy krok fazy 2: `scripts/site-browser.sh`, ręcznie otworzyć listing Allegro w tym oknie, potem CLI z `--save-html`. Jeśli wyzwanie pojawia się przy każdym zapytaniu mimo rozwiązania, wrócić do planu (krok 1): oficjalne API albo inny serwis.
-- **Instancja na hoście musi działać**, żeby narzędzie działało. Narzędzie mówi to modelowi wprost (pkt 7), zamiast udawać awarię wyszukiwarki.
-- **Dostęp kontenera do hosta** (`host.containers.internal`) zależy od konfiguracji sieci podmana. Zweryfikować na starcie fazy 1 (pkt B).
+- **Headless z kontenera w chmurze: zablokowane; Chrome z oknem w kontenerze lokalnie: przechodzi** (prototyp, patrz „Zmiana decyzji”). Jeśli DataDome zacznie pokazywać captchę przy każdym zapytaniu, wrócić do planu (krok 1): oficjalne API albo inny serwis.
+- **`site-agent` musi działać**, żeby narzędzie działało. Narzędzie mówi to modelowi wprost (pkt 7), zamiast udawać awarię wyszukiwarki.
+- **Tylko amd64**: Google Chrome nie ma linuksowej wersji arm64. Na arm64 trzeba by Chromium z Debiana (nie sprawdzone z DataDome).
+- **Czy strona testu DataDome przeładowuje się sama** (pkt F): do sprawdzenia na świeżym profilu. Jeśli nie, pierwsze zapytanie po starcie kontenera kończy się `blocked`, a kolejne przechodzą.
 - Nie dodawać fałszywych nagłówków, opóźnień „dla ludzkości” ani innych technik maskowania. Weryfikację rozwiązuje człowiek.
 
 ## Kryteria akceptacji
@@ -154,16 +138,19 @@ E. **Fixture'y z prawdziwej strony.** Z chmury nie da się pobrać listingu, wi�
 - `GenerationGuard`: po `site_search` generacja jest oznaczona jako tainted (tak jak po `web_search`).
 
 **Tryby instancji**
-- Instancja z `sites_only=true`: `POST /v1/search` → 404, `/v1/site-search` działa. Instancja domyślna (kontener): `/v1/site-search` → 404.
+- Instancja z `sites_only=true`: `POST /v1/search` → 404, `/v1/site-search` działa. Instancja domyślna (`web-agent`): `/v1/site-search` → 404.
 - `reuse_default_context=true`: po 5 wyszukiwaniach liczba otwartych kart w przeglądarce wraca do stanu sprzed (poza ewentualną jedną kartą z wyzwaniem), kontekst nie jest tworzony ani zamykany.
 - Blokada w trybie `reuse_default_context` zostawia kartę otwartą; kolejne zapytanie do tego samego serwisu najpierw ją zamyka (nigdy więcej niż jedna karta z wyzwaniem na serwis).
+- `block_settle_s`: strona blokady, która w tym czasie sama przeładuje się na zwykłą stronę → wynik z nowej strony; bez przeładowania → `blocked` po `block_settle_s`; silnik z `block_settle_s = 0` → `blocked` od razu (DuckDuckGo jak dziś).
+- `AllegroSite().url_for(SearchQuery(query="x", sort="price_asc"))` → `…/listing?string=x&order=p`; `price_desc` → `order=pd`; `relevance` → bez `order`.
 
 **Ręcznie**
-- `scripts/site-browser.sh` otwiera okno Chrome'a z nowym profilem w `~/.local-agent/site-browser`; `curl http://127.0.0.1:9222/json/version` odpowiada, a z innego komputera w sieci port 9222 jest niedostępny.
-- `uv run web-agent site allegro.pl "rower gravel" --cdp-url http://127.0.0.1:9222 --max-results 5` wypisuje 5 ofert z cenami i URL-ami `allegro.pl/oferta/…` w < 15 s, a w oknie widać otwierającą się i zamykaną kartę. Przy wyzwaniu: `blocked`, karta zostaje; po ręcznym rozwiązaniu ponowienie daje wyniki.
-- Z zatrzymanym `scripts/site-agent.sh` narzędzie w czacie zwraca komunikat o niedziałającej przeglądarce na komputerze użytkownika.
+- `podman-compose up -d --build site-agent site-vnc api`: `site-agent` zdrowy; `http://localhost:6080/vnc.html` pokazuje ekran przeglądarki; z innego komputera w sieci port 6080 jest niedostępny.
+- Świeży kontener, pierwsze zapytanie w czacie „znajdź na allegro najtańsze raspberry pi 4” → `site_search(site="allegro.pl", sort="price_asc")`, oferty z cenami rosnąco i URL-ami `allegro.pl/oferta/…` w < 20 s (w tym czekanie z pkt F).
 - W czacie: „znajdź na allegro rower gravel do 3000 zł” → model woła `site_search` z `site="allegro.pl"`, a nie `web_search` z `site:`.
-- W logach `egress-proxy` są tylko żądania do domen z listy Allegro (i nic do Google). Wejście w tym oknie na stronę spoza listy (np. ręcznie `example.com`) kończy się odmową proxy — to oczekiwane: to okno służy tylko agentowi.
+- `podman-compose stop site-agent` → narzędzie w czacie zwraca komunikat o niedziałającej usłudze.
+- `podman exec local-agent_web-agent_1 python -c "import urllib.request as u; u.urlopen('http://site-agent:8080/health', timeout=3)"` → błąd (brak trasy): headless web-agent nie widzi `site-agent`.
+- W logach `egress-proxy` przy wyszukiwaniu są tylko hosty z listy Allegro/DataDome.
 - Istniejące testy (`uv run pytest`) przechodzą.
 
 ## Notatki implementacyjne

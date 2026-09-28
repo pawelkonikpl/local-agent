@@ -35,8 +35,31 @@ def _sse_body(text: str) -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
 
-def _mock_llm_proxy_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://mock-llm-proxy.test")
+# What llm-proxy's `GET /v1/models` answers in these tests -- in production it asks the providers.
+_PROXY_MODELS = [
+    {"id": "claude-opus-5-5", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
+    {"id": "claude-sonnet-5", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
+    {"id": "claude-haiku-4-5-20251001", "reasoning_efforts": []},
+    {"id": "gpt-6-luna", "reasoning_efforts": ["low", "medium", "high"]},
+]
+
+
+def _mock_llm_proxy_client(
+    handler: Callable[[httpx.Request], httpx.Response], models: list[dict] = _PROXY_MODELS
+) -> httpx.AsyncClient:
+    """`handler` serves `/v1/messages`; `/v1/models` answers with `models`."""
+
+    def route(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            assert request.headers["authorization"] == f"Bearer {settings.internal_proxy_token}"
+            return httpx.Response(200, json={"models": models})
+        return handler(request)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(route), base_url="http://mock-llm-proxy.test")
+
+
+def _no_generation(request: httpx.Request) -> httpx.Response:
+    raise AssertionError("llm-proxy must not be asked to generate in this test")
 
 
 async def _create_user_and_login(client: AsyncClient, db_session: AsyncSession, email: str) -> None:
@@ -211,6 +234,7 @@ async def test_get_usage_for_other_users_session_returns_404(
 
 async def test_list_models_returns_default_first(client: AsyncClient, db_session: AsyncSession) -> None:
     await _create_user_and_login(client, db_session, "quinn@example.com")
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(_no_generation)
 
     response = await client.get("/models")
 
@@ -218,22 +242,52 @@ async def test_list_models_returns_default_first(client: AsyncClient, db_session
     body = response.json()
     assert body["default"] == settings.chat_model
     assert body["models"][0]["id"] == settings.chat_model
+    assert {model["id"] for model in body["models"]} == {model["id"] for model in _PROXY_MODELS}
 
 
-async def test_list_models_reports_reasoning_efforts_per_model(client: AsyncClient, db_session: AsyncSession) -> None:
+async def test_list_models_reports_the_providers_reasoning_efforts(client: AsyncClient, db_session: AsyncSession) -> None:
     await _create_user_and_login(client, db_session, "quincy@example.com")
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(_no_generation)
 
     response = await client.get("/models")
 
     efforts = {model["id"]: model["reasoning_efforts"] for model in response.json()["models"]}
-    assert efforts["claude-sonnet-5"] == settings.chat_model_reasoning_efforts["claude-sonnet-5"]
-    assert efforts["local-model"] == []
+    assert efforts == {model["id"]: model["reasoning_efforts"] for model in _PROXY_MODELS}
+
+
+async def test_list_models_defaults_to_the_first_listed_when_chat_model_is_not_offered(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _create_user_and_login(client, db_session, "quentin@example.com")
+    offered = [model for model in _PROXY_MODELS if model["id"] != settings.chat_model]
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(_no_generation, offered)
+
+    response = await client.get("/models")
+
+    body = response.json()
+    assert body["default"] == offered[0]["id"]
+    assert body["models"][0]["id"] == offered[0]["id"]
+
+
+async def test_list_models_when_llm_proxy_cannot_list_returns_502(client: AsyncClient, db_session: AsyncSession) -> None:
+    await _create_user_and_login(client, db_session, "quigley@example.com")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, json={"detail": "No provider could list its models"})
+
+    app.dependency_overrides[get_llm_proxy_client] = lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://mock-llm-proxy.test"
+    )
+
+    response = await client.get("/models")
+
+    assert response.status_code == 502
 
 
 async def test_post_message_forwards_the_chosen_model(client: AsyncClient, db_session: AsyncSession) -> None:
     await _create_user_and_login(client, db_session, "rosa@example.com")
     session_id = (await client.post("/sessions")).json()["id"]
-    chosen = settings.available_chat_models[-1]
+    chosen = _PROXY_MODELS[-1]["id"]
     sent_models: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -295,14 +349,11 @@ async def test_post_message_with_unsupported_reasoning_effort_returns_422_and_sa
     await _create_user_and_login(client, db_session, "sid@example.com")
     session_id = uuid.UUID((await client.post("/sessions")).json()["id"])
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("llm-proxy must not be called for an unsupported reasoning effort")
-
-    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(handler)
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(_no_generation)
 
     response = await client.post(
         f"/sessions/{session_id}/messages",
-        json={"content": "hi", "model": "local-model", "reasoning_effort": "high"},
+        json={"content": "hi", "model": "claude-haiku-4-5-20251001", "reasoning_effort": "high"},
     )
 
     assert response.status_code == 422
@@ -316,10 +367,7 @@ async def test_post_message_with_unknown_model_returns_422_and_saves_nothing(
     await _create_user_and_login(client, db_session, "sam@example.com")
     session_id = uuid.UUID((await client.post("/sessions")).json()["id"])
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("llm-proxy must not be called for an unknown model")
-
-    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(handler)
+    app.dependency_overrides[get_llm_proxy_client] = lambda: _mock_llm_proxy_client(_no_generation)
 
     response = await client.post(f"/sessions/{session_id}/messages", json={"content": "hi", "model": "gpt-nope"})
 

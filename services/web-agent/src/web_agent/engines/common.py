@@ -2,16 +2,23 @@
 into clean, deduplicated `SearchResult`s."""
 
 import json
+import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from typing import Literal
 from urllib.parse import urldefrag, urlparse, urlunparse
 
+from pydantic import ValidationError
+
 from web_agent.guard import domain_signals, injection_signals, sanitize
-from web_agent.models import SearchResult
+from web_agent.models import RawEntry, SearchResult
+
+logger = logging.getLogger(__name__)
 
 SNIPPET_MAX_CHARS = 300
 WITHHELD_URL_MAX_CHARS = 200
 BLOCKING_STATUSES = frozenset({403, 429})
+SPONSORED_FLAG = "sponsored"
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -46,25 +53,33 @@ def blocking_status(status: int | None) -> bool:
 
 
 def build_results(
-    raw: list[dict], max_results: int, resolve_href: Callable[[str], str | None]
+    raw: list[dict],
+    max_results: int,
+    resolve_href: Callable[[str], str | None],
+    *,
+    ads: Literal["drop", "flag"] = "drop",
+    snippet_max_chars: int = SNIPPET_MAX_CHARS,
 ) -> list[SearchResult]:
-    """Drop ads and non-http(s) links, deduplicate by URL without `#fragment`, rank from 1.
+    """Drop non-http(s) links, deduplicate by URL without `#fragment`, rank from 1.
 
-    Every text first goes through `guard.sanitize`. An entry whose title or snippet looks like
-    instructions aimed at the model is kept but withheld: empty title and snippet, URL without its
-    query string, so the model can name the page without reading what it says.
+    Ads are dropped by default; with `ads="flag"` (shops, where sponsored offers are real offers)
+    they stay, flagged `sponsored`. Every text first goes through `guard.sanitize`. An entry whose
+    title, snippet or price looks like instructions aimed at the model is kept but withheld: empty
+    title, snippet and price, URL without its query string, so the model can name the page without
+    reading what it says.
     """
     results: list[SearchResult] = []
     seen: set[str] = set()
-    for entry in raw:
+    for entry in _raw_entries(raw):
         if len(results) >= max_results:
             break
-        if entry.get("is_ad"):
+        if entry.is_ad and ads == "drop":
             continue
-        href = sanitize(str(entry.get("href") or ""))
+        href = sanitize(entry.href)
         url = resolve_href(href.text)
-        title = sanitize(str(entry.get("title") or ""))
-        snippet = sanitize(str(entry.get("snippet") or ""))
+        title = sanitize(entry.title)
+        snippet = sanitize(entry.snippet)
+        price = sanitize(entry.price or "")
         if url is None or not _normalize(title.text):
             continue
         key = urldefrag(url).url
@@ -73,23 +88,35 @@ def build_results(
         seen.add(key)
         hostname = urlparse(url).hostname or ""
         # Signals are computed on the full text, before the snippet is cut short.
-        flags = injection_signals(f"{title.text}\n{snippet.text}")
-        if href.removed_tags or title.removed_tags or snippet.removed_tags:
+        flags = injection_signals(f"{title.text}\n{snippet.text}\n{price.text}")
+        if href.removed_tags or title.removed_tags or snippet.removed_tags or price.removed_tags:
             flags.append("hidden_unicode")
         withheld = bool(flags)
         flags += domain_signals(url)
+        if entry.is_ad:
+            flags.append(SPONSORED_FLAG)
         results.append(
             SearchResult(
                 rank=len(results) + 1,
                 title="" if withheld else _normalize(title.text),
                 url=_without_query(url) if withheld else url,
-                snippet="" if withheld else _normalize(snippet.text)[:SNIPPET_MAX_CHARS],
+                snippet="" if withheld else _normalize(snippet.text)[:snippet_max_chars],
                 domain=hostname.removeprefix("www."),
+                price=None if withheld else (_normalize(price.text) or None),
                 flags=flags,
                 withheld=withheld,
             )
         )
     return results
+
+
+def _raw_entries(raw: list[dict]) -> Iterator[RawEntry]:
+    """`raw` parsed into `RawEntry`s; entries of an unexpected shape are skipped, not fatal."""
+    for item in raw:
+        try:
+            yield RawEntry.model_validate(item)
+        except ValidationError:
+            logger.debug("Skipping a malformed raw entry: %.200r", item)
 
 
 def _without_query(url: str) -> str:

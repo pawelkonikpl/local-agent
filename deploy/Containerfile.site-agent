@@ -1,0 +1,33 @@
+# `site_search`'s browser: a real, headful Google Chrome on a virtual screen (Xvfb), started by us
+# with CDP -- not by Playwright, so without automation flags -- and web-agent in sites-only mode
+# driving it. Shops like Allegro refuse a headless browser; this one passes their JS bot check.
+# Google Chrome exists for linux/amd64 only.
+FROM python:3.12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates wget xvfb x11vnc fonts-liberation \
+    && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && apt-get install -y --no-install-recommends /tmp/chrome.deb \
+    && rm -rf /var/lib/apt/lists/* /tmp/chrome.deb
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+COPY services/web-agent/pyproject.toml services/web-agent/pyproject.toml
+RUN uv sync --frozen --no-install-workspace --no-dev --package web-agent
+# No Playwright browsers: web-agent only attaches to Chrome over CDP here.
+COPY services/web-agent/src services/web-agent/src
+RUN uv sync --frozen --no-dev --package web-agent
+
+COPY --chmod=755 deploy/site-agent/entrypoint.sh /usr/local/bin/site-agent-entrypoint
+
+RUN useradd -u 10001 -M -d /tmp appuser
+USER 10001:10001
+# The root filesystem is read-only; X, Chrome's profile and caches go to /tmp (a tmpfs).
+ENV HOME=/tmp
+ENV PATH="/app/.venv/bin:${PATH}"
+EXPOSE 8080 5900
+
+CMD ["site-agent-entrypoint"]

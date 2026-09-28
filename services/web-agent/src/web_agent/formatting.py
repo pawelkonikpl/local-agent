@@ -1,3 +1,4 @@
+from web_agent.engines.common import SPONSORED_FLAG
 from web_agent.models import SearchResponse, SearchResult
 
 
@@ -15,7 +16,13 @@ def format_text(response: SearchResponse) -> str:
 def _format_result(result: SearchResult) -> str:
     if result.withheld:
         return f"{result.rank}. [withheld: {', '.join(result.flags)}]\n   {result.url}"
-    lines = f"{result.rank}. {result.title}\n   {result.url}\n   {result.snippet}".rstrip()
-    if result.flags:
-        lines += f"\n   [flags: {', '.join(result.flags)}]"
+    heading = f"{result.rank}. {result.title}"
+    if result.price:
+        heading += f" — {result.price}"
+    if SPONSORED_FLAG in result.flags:
+        heading += " [sponsored]"
+    lines = f"{heading}\n   {result.url}\n   {result.snippet}".rstrip()
+    other_flags = [flag for flag in result.flags if flag != SPONSORED_FLAG]
+    if other_flags:
+        lines += f"\n   [flags: {', '.join(other_flags)}]"
     return lines
