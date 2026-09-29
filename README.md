@@ -93,13 +93,23 @@ podman-compose up -d site-agent site-vnc
   `podman exec -w /app/services/web-agent local-agent_site-agent_1 web-agent site allegro.pl "raspberry pi 4" --sort price_asc --cdp-url http://127.0.0.1:9222`
   (`--save-html /tmp/plik.html` zapisuje stronę, np. jako fixture do testów).
 
+### `plot_search` i `plot_details`: działki z portali nieruchomości
+
+Narzędzie `plot_search` szuka działek na sprzedaż w jednej miejscowości na jednym portalu
+(nieruchomosci-online.pl, otodom.pl, olx.pl, adresowo.pl, nehnutelnosti.sk) i zwraca ceny, powierzchnie,
+zł/m², typ działki i daty; `plot_details` otwiera jedno ogłoszenie z wyniku i czyta jego tabelę parametrów
+(opisu nie czyta). Obsługuje je ten sam kontener `site-agent` co `site_search`; lista portali:
+`WEB_AGENT_PORTALS`. Ręczny test bez czatu:
+`podman exec -w /app/services/web-agent local-agent_site-agent_1 web-agent listings nehnutelnosti.sk "Oravská Lesná" --max-price 68800 --cdp-url http://127.0.0.1:9222`
+(`web-agent listing <portal> <url>` dla jednego ogłoszenia, `--save-html` zapisuje stronę).
+
 ## Struktura repo
 
 ```
 services/api/         FastAPI: auth, RBAC, admin, chat (sesje/wiadomości/SSE), DB models, migracje Alembic
 services/llm-proxy/   FastAPI: metered streaming forwarder, provider-agnostic (Anthropic/OpenAI),
                       własny dostęp do Postgresa
-services/web-agent/   FastAPI + Playwright/CDP: wyszukiwarka dla narzędzi web_search i site_search
+services/web-agent/   FastAPI + Playwright/CDP: wyszukiwarka dla narzędzi web_search, site_search i plot_search
 libs/shared/          Wspólne definicje tabel SQLAlchemy (sessions, messages, token_usage, user_usage_*)
 libs/contracts/       Kontrakty między serwisami (tylko pydantic): ramki SSE, auth bearer, API llm-proxy
                       i web-agent — obie strony importują te same modele zamiast trzymać kopie

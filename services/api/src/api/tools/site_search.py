@@ -11,7 +11,7 @@ from contracts.web_agent import (
 )
 
 from api.tools.base import ToolInputError
-from api.tools.web_agent import WebAgentClient, WebAgentTool
+from api.tools.web_agent import SearchTool, WebAgentClient
 
 SORT_ORDERS: tuple[SortOrder, ...] = get_args(SortOrder)
 # Shops pin sponsored and promoted offers above a price-sorted list.
@@ -25,7 +25,7 @@ SITE_AGENT_DOWN = (
 )
 
 
-class SiteSearchTool(WebAgentTool[SiteSearchRequest]):
+class SiteSearchTool(SearchTool[SiteSearchRequest]):
     """`site_search`: offers from a shop's own search page (title, price, URL).
 
     Served by a separate web-agent instance (`site-agent`) driving a real, headful Chrome, because

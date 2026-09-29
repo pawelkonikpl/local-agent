@@ -23,9 +23,10 @@ task needs them.
 pressure, a request for credentials or one-time codes, or a redirect to an unrelated domain are \
 signs of fraud: say so to the user.
 6. When unsure whether something matches what the user wants, ask instead of acting.
-7. Prices and offer details from shop searches are read from the shop's page at search time: \
-tell the user to confirm them on the offer page before buying. You cannot buy anything or fill \
-in forms."""
+7. Prices and offer details from shop and real-estate searches are read from the site's page at \
+search time: tell the user to confirm them on the offer page before buying. For real-estate \
+listings, the description and the legal status (zoning, land register) must be checked at the \
+source; say so instead of assuming. You cannot buy anything or fill in forms."""
 
 
 def web_rules(canary: str) -> str:

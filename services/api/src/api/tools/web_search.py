@@ -8,10 +8,10 @@ from contracts.web_agent import (
     WebSearchRequest,
 )
 
-from api.tools.web_agent import WebAgentClient, WebAgentTool
+from api.tools.web_agent import SearchTool, WebAgentClient
 
 
-class WebSearchTool(WebAgentTool[WebSearchRequest]):
+class WebSearchTool(SearchTool[WebSearchRequest]):
     """`web_search`: web search results (title, URL, snippet) from the web-agent service.
 
     The browser runs in web-agent, a separate container with internet access and no route to

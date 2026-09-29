@@ -6,6 +6,8 @@ from api.config import settings
 from api.tools.base import Tool, ToolInputError, ToolResult
 from api.tools.current_time import CurrentTimeTool
 from api.tools.guard import GenerationGuard
+from api.tools.plot_details import PlotDetailsTool
+from api.tools.plot_search import PlotSearchTool
 from api.tools.site_search import SiteSearchTool
 from api.tools.web_agent import WebAgentClient
 from api.tools.web_search import WebSearchTool
@@ -94,6 +96,12 @@ def build_default_registry() -> ToolRegistry:
                 view_url=settings.site_browser_view_url,
             )
         )
+    portals = settings.web_agent_portals if settings.web_agent_sites_url else []
+    if portals:
+        client = _web_agent_client(settings.web_agent_sites_url)
+        view_url = settings.site_browser_view_url
+        tools.append(PlotSearchTool(client, portals=portals, view_url=view_url))
+        tools.append(PlotDetailsTool(client, portals=portals, view_url=view_url))
     return ToolRegistry(
         tools,
         timeout_s=settings.tool_timeout_s,

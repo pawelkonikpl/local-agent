@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     # (its `/v1/sites`); override with WEB_AGENT_SITES (JSON).
     web_agent_sites_url: str | None = None
     web_agent_sites: list[str] = ["allegro.pl"]
+    # Real-estate portals behind `plot_search`/`plot_details`, served by the same instance; names
+    # web-agent knows (its `/v1/portals`). Empty = the tools aren't offered. WEB_AGENT_PORTALS (JSON).
+    web_agent_portals: list[str] = [
+        "nieruchomosci-online.pl",
+        "nehnutelnosti.sk",
+        "otodom.pl",
+        "olx.pl",
+        "adresowo.pl",
+    ]
     # Where the user sees that browser's screen (compose: `site-vnc`) to solve a bot check.
     site_browser_view_url: str = "http://localhost:6080/vnc.html?autoconnect=1&resize=scale"
 

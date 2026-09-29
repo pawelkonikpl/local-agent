@@ -1,10 +1,12 @@
 """Pieces every HTML-results engine shares: the DOM extraction script, block and no-results
-detection by page markers, and turning raw entries into clean, deduplicated `SearchResult`s."""
+detection by page markers, screening one entry's texts (`screen`, also used by the portals), and
+turning raw entries into clean, deduplicated `SearchResult`s."""
 
 import json
 import logging
 import re
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import urldefrag, urlparse, urlunparse
 
@@ -105,19 +107,16 @@ def build_results(
             continue
         href = sanitize(entry.href)
         url = resolve_href(href.text)
-        title = sanitize(entry.title)
-        snippet = sanitize(entry.snippet)
-        price = sanitize(entry.price or "")
-        if url is None or not _normalize(title.text):
+        screened = screen(title=entry.title, snippet=entry.snippet, price=entry.price or "")
+        if url is None or not screened.texts["title"]:
             continue
         key = urldefrag(url).url
         if key in seen:
             continue
         seen.add(key)
         hostname = urlparse(url).hostname or ""
-        # Signals are computed on the full text, before the snippet is cut short.
-        flags = injection_signals(f"{title.text}\n{snippet.text}\n{price.text}")
-        if href.removed_tags or title.removed_tags or snippet.removed_tags or price.removed_tags:
+        flags = list(screened.flags)
+        if href.removed_tags and HIDDEN_UNICODE_FLAG not in flags:
             flags.append(HIDDEN_UNICODE_FLAG)
         withheld = bool(flags)
         flags += domain_signals(url)
@@ -126,16 +125,40 @@ def build_results(
         results.append(
             SearchResult(
                 rank=len(results) + 1,
-                title="" if withheld else _normalize(title.text),
-                url=_without_query(url) if withheld else url,
-                snippet="" if withheld else _normalize(snippet.text)[:snippet_max_chars],
+                title="" if withheld else screened.texts["title"],
+                url=without_query(url) if withheld else url,
+                snippet="" if withheld else screened.texts["snippet"][:snippet_max_chars],
                 domain=hostname.removeprefix("www."),
-                price=None if withheld else (_normalize(price.text) or None),
+                price=None if withheld else (screened.texts["price"] or None),
                 flags=flags,
                 withheld=withheld,
             )
         )
     return results
+
+
+@dataclass(frozen=True)
+class Screened:
+    """Texts of one entry after `screen`: sanitized and whitespace-normalized, by field name."""
+
+    texts: dict[str, str]
+    # Prompt-injection signals, plus `hidden_unicode` if any text carried Unicode tag characters.
+    flags: tuple[str, ...]
+
+    @property
+    def withheld(self) -> bool:
+        """An entry with any signal is kept but withheld: its texts must not reach the model."""
+        return bool(self.flags)
+
+
+def screen(**fields: str) -> Screened:
+    """Every text of one entry through `guard.sanitize`, then the injection signals over all of them
+    together. Signals are computed on the full texts, before any is cut short."""
+    sanitized = {name: sanitize(text) for name, text in fields.items()}
+    flags = injection_signals("\n".join(text.text for text in sanitized.values()))
+    if any(text.removed_tags for text in sanitized.values()):
+        flags.append(HIDDEN_UNICODE_FLAG)
+    return Screened({name: _normalize(text.text) for name, text in sanitized.items()}, tuple(flags))
 
 
 def _raw_entries(raw: list[dict]) -> Iterator[RawEntry]:
@@ -147,7 +170,7 @@ def _raw_entries(raw: list[dict]) -> Iterator[RawEntry]:
             logger.debug("Skipping a malformed raw entry: %.200r", item)
 
 
-def _without_query(url: str) -> str:
+def without_query(url: str) -> str:
     """`url` without query string and fragment, which could carry the attack text itself."""
     return urlunparse(urlparse(url)._replace(query="", fragment="", params=""))[:WITHHELD_URL_MAX_CHARS]
 

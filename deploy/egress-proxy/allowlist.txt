@@ -7,3 +7,21 @@ allegro.pl
 assets.allegrostatic.com
 geo.captcha-delivery.com
 ct.captcha-delivery.com
+
+# plot_search: nieruchomosci-online.pl (the search page, offers on per-town hosts such as
+# czarna-gora.nieruchomosci-online.pl, the portal's scripts, and jQuery from cdnjs, which render it)
+*.nieruchomosci-online.pl
+s.st-nieruchomosci-online.pl
+cdnjs.cloudflare.com
+
+# plot_search: nehnutelnosti.sk (listing, offers and the location autocomplete)
+www.nehnutelnosti.sk
+
+# plot_search: otodom.pl (listing, offers and the location autocomplete)
+www.otodom.pl
+
+# plot_search: olx.pl (listing, offers and the location autocomplete)
+www.olx.pl
+
+# plot_search: adresowo.pl (listing, offers and the location autocomplete)
+adresowo.pl

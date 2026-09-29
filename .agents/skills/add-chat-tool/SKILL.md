@@ -17,8 +17,11 @@ Read these before writing anything:
 - `services/api/src/api/tools/registry.py`: `ToolRegistry` and `build_default_registry()`
 - `services/api/src/api/tools/current_time.py`: the reference tool; copy its structure
 - `services/api/src/api/tools/web_agent.py`: `WebAgentTool`, the base for tools served by web-agent
-  (`web_search`, `site_search`). A new web-agent-backed tool subclasses it and only writes its
-  texts; its request model goes into `libs/contracts/src/contracts/web_agent.py`, shared with web-agent.
+  (validate, call, format; generic over the request and response models), and `SearchTool` for
+  those answering `SearchResponse` (`web_search`, `site_search`). A new web-agent-backed tool
+  subclasses one of them and only writes its texts; its request and response models go into
+  `libs/contracts` (`web_agent.py`, or a module of its own like `listings.py` for `plot_search`),
+  shared with web-agent.
 
 ## Steps
 

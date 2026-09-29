@@ -1,6 +1,7 @@
-"""What the web tools share: the web-agent HTTP client, and `WebAgentTool`, the base every tool
-backed by web-agent derives from. It turns web-agent's `SearchResponse` into model-facing text,
-wrapping page content as data (spotlighting) and describing flags.
+"""What the web tools share: the web-agent HTTP client; `WebAgentTool`, the base every tool
+backed by web-agent derives from (validate, call, describe the response); and `SearchTool`, which
+turns web-agent's `SearchResponse` into model-facing text, wrapping page content as data
+(spotlighting) and describing flags.
 """
 
 import re
@@ -17,7 +18,7 @@ from contracts.web_agent import (
     SearchResponse,
     SearchResult,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from api.tools.base import Capability, ToolInputError, ToolResult, parse_input
 
@@ -40,7 +41,7 @@ class WebAgentCallError(Exception):
 
 
 class WebAgentClient:
-    """One web-agent instance: `post` a request, get its `SearchResponse`."""
+    """One web-agent instance: `post` a request, get its response as `response_model`."""
 
     def __init__(
         self, *, base_url: str, token: str, timeout_s: float, transport: httpx.AsyncBaseTransport | None = None
@@ -50,7 +51,9 @@ class WebAgentClient:
         self._timeout_s = timeout_s
         self._transport = transport
 
-    async def post(self, path: str, request: SearchRequest) -> SearchResponse:
+    async def post[ResponseT: BaseModel](
+        self, path: str, request: BaseModel, response_model: type[ResponseT] = SearchResponse
+    ) -> ResponseT:
         """Raises `ToolInputError` on a 422 (the model's input was bad), `WebAgentUnreachableError`
         or `WebAgentCallError` when the call itself failed."""
         async with httpx.AsyncClient(
@@ -70,17 +73,17 @@ class WebAgentClient:
         if response.status_code != 200:
             raise WebAgentCallError(f"service failed with HTTP {response.status_code}.")
         try:
-            return SearchResponse.model_validate_json(response.content)
+            return response_model.model_validate_json(response.content)
         except ValidationError as exc:
             raise WebAgentCallError("service returned an unexpected response.") from exc
 
 
-class WebAgentTool[RequestT: SearchRequest](ABC):
+class WebAgentTool[RequestT: BaseModel, ResponseT: BaseModel](ABC):
     """A tool served by web-agent: validate the model's input into `request_model`, POST it to
-    `path`, and describe the `SearchResponse` for the model.
+    `path`, and describe its `response_model` for the model.
 
-    Subclasses set the class attributes and write the per-status texts; the HTTP call, error
-    handling, result formatting and spotlighting are the same for all of them.
+    Subclasses set the class attributes and write `_format`; the input validation, HTTP call and
+    error handling are the same for all of them.
     """
 
     name: str
@@ -89,6 +92,7 @@ class WebAgentTool[RequestT: SearchRequest](ABC):
     # The query leaves for a public site; the results are page text written by strangers.
     capabilities: frozenset[Capability] = frozenset({"reads_untrusted", "external_effect"})
     request_model: type[RequestT]
+    response_model: type[ResponseT]
     path: str
     # Starts the model-facing error messages, e.g. "Web search timed out after 28s."
     label: str
@@ -100,7 +104,7 @@ class WebAgentTool[RequestT: SearchRequest](ABC):
     async def run(self, input: dict) -> ToolResult:
         request = self._parse(input)
         try:
-            response = await self._client.post(self.path, request)
+            response = await self._client.post(self.path, request, self.response_model)
         except WebAgentUnreachableError as exc:
             return ToolResult(f"{self.unreachable_message} ({exc})", is_error=True)
         except WebAgentCallError as exc:
@@ -109,6 +113,16 @@ class WebAgentTool[RequestT: SearchRequest](ABC):
 
     def _parse(self, input: dict) -> RequestT:
         return parse_input(self.request_model, input)
+
+    @abstractmethod
+    def _format(self, request: RequestT, response: ResponseT) -> ToolResult: ...
+
+
+class SearchTool[RequestT: SearchRequest](WebAgentTool[RequestT, SearchResponse]):
+    """A web-agent tool answering `SearchResponse` (`web_search`, `site_search`): subclasses write
+    the per-status texts; result formatting and spotlighting are shared."""
+
+    response_model = SearchResponse
 
     def _format(self, request: RequestT, response: SearchResponse) -> ToolResult:
         match response.status:
